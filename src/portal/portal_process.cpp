@@ -3,7 +3,7 @@
 #include "core/constants.h"
 #include <QSslError>
 #include <QHostAddress>
-#include <QHostInfo>
+#include <QNetworkInterface>
 #include <QRandomGenerator>
 
 // ============================================================================
@@ -19,9 +19,14 @@ PortalProcess::PortalProcess(QObject* parent)
 
 PortalProcess::~PortalProcess()
 {
-    // 非常规退出路径（进程结束）兜底：中止在飞请求，避免 NAM 析构时回调悬空
-    if (m_activeReply)
+    // 非常规退出路径（进程结束）兜底：先断开 reply 的已连接信号再 abort，
+    // 避免 abort() 触发的 finished/sslErrors 在对象析构后派发（悬垂 this）。
+    // NAM 析构会清理在飞 reply，此处无需手动 delete。
+    if (m_activeReply) {
+        m_activeReply->disconnect(this);
         m_activeReply->abort();
+        m_activeReply = nullptr;
+    }
 }
 
 void PortalProcess::setConfig(const AuthConfig& config)
@@ -45,21 +50,32 @@ void PortalProcess::start()
         m_keepaliveTimer->setInterval(PORTAL_KEEPALIVE_INTERVAL);
         connect(m_keepaliveTimer, &QTimer::timeout,
                 this, &PortalProcess::onKeepaliveTimeout);
+        m_sessionTimer = new QTimer(this);
+        m_sessionTimer->setSingleShot(true);
+        m_sessionTimer->setInterval(PORTAL_SESSION_TIMEOUT);
+        connect(m_sessionTimer, &QTimer::timeout,
+                this, &PortalProcess::onSessionTimeout);
     }
 
-    // 新会话：代数递增使旧会话在飞回复作废；停掉旧保活（若有）
+    // 新会话：代数递增使旧会话在飞回复作废；停掉旧保活/会话超时（若有）
     ++m_generation;
     if (m_activeReply) {
-        m_activeReply->abort();   // finished 延续因代数不匹配被丢弃
+        m_activeReply->disconnect(this);
+        m_activeReply->abort();
         m_activeReply = nullptr;
     }
     m_keepaliveTimer->stop();
+    m_sessionTimer->stop();
     m_wasOnline = false;
     m_lastUserIp.clear();
 
     setCurrentState(AuthState::SendingStart);
     emit stateChanged(AuthState::SendingStart,
                       QStringLiteral("正在查询 Portal 在线状态..."));
+
+    // 会话整体超时：chkstatus+login 整条登录链路的兜底（30s），
+    // 网络卡死时按暂时性失败进入既有自动重连排程，避免无限等待
+    m_sessionTimer->start();
 
     m_keepaliveCheck = false;
     sendRequest(PortalProtocol::buildChkstatusUrl(
@@ -71,11 +87,14 @@ void PortalProcess::stop()
 {
     ++m_generation;
     if (m_activeReply) {
+        m_activeReply->disconnect(this);
         m_activeReply->abort();
         m_activeReply = nullptr;
     }
     if (m_keepaliveTimer)
         m_keepaliveTimer->stop();
+    if (m_sessionTimer)
+        m_sessionTimer->stop();
 
     const bool wasOnline = m_wasOnline;
     m_wasOnline = false;
@@ -107,6 +126,14 @@ void PortalProcess::sendRequest(const QUrl& url,
     req.setTransferTimeout(PORTAL_REQUEST_TIMEOUT);
     // 会话代数随请求下发（logout 不设置，默认 -1，回调不做代数拦截）
     req.setAttribute(QNetworkRequest::User, m_generation);
+
+    // 在飞请求去重：并发（如保活检测尚未完成又触发下一轮）时先中止旧请求并
+    // 断开其信号，避免旧 finished 延续以相同代数通过守卫、造成重复登录/重复处理。
+    if (m_activeReply) {
+        m_activeReply->disconnect(this);
+        m_activeReply->abort();
+        m_activeReply = nullptr;
+    }
 
     QNetworkReply* reply = m_nam->get(req);
     m_activeReply = reply;
@@ -192,6 +219,10 @@ void PortalProcess::beginLogin()
     emit stateChanged(AuthState::SendingIdentity,
                       QStringLiteral("正在登录 Portal（%1）...").arg(m_lastUserIp));
 
+    // 登录也有独立时限：重置会话超时（覆盖掉线重登的登录链）
+    if (m_sessionTimer)
+        m_sessionTimer->start();
+
     sendRequest(PortalProtocol::buildLoginUrl(
                     m_config.host, m_config.username, m_config.password, m_lastUserIp,
                     QRandomGenerator::global()->bounded(100000, 999999)),
@@ -243,6 +274,8 @@ void PortalProcess::onLoginFinished(QNetworkReply* reply)
 
 void PortalProcess::finishSuccess(const QString& reason)
 {
+    if (m_sessionTimer)
+        m_sessionTimer->stop();   // 已成功：停止登录链路超时
     m_wasOnline = true;
     setCurrentState(AuthState::Authenticated);
     m_keepaliveTimer->start();
@@ -252,6 +285,8 @@ void PortalProcess::finishSuccess(const QString& reason)
 
 void PortalProcess::finishFailure(const QString& msg, bool retryable)
 {
+    if (m_sessionTimer)
+        m_sessionTimer->stop();   // 已失败：停止登录链路超时
     m_keepaliveTimer->stop();
     m_wasOnline = false;
     setCurrentState(AuthState::Failed);
@@ -270,6 +305,17 @@ void PortalProcess::onKeepaliveTimeout()
     sendRequest(PortalProtocol::buildChkstatusUrl(
                     m_config.host, QRandomGenerator::global()->bounded(100000, 999999)),
                 &PortalProcess::onChkstatusFinished);
+}
+
+void PortalProcess::onSessionTimeout()
+{
+    // 登录链路整体超时（chkstatus/login 在 PORTAL_SESSION_TIMEOUT 内无结果）。
+    // 按暂时性失败处理（retryable=true），交由上层既有自动重连排程。
+    if (m_currentState == AuthState::Authenticated)
+        return;   // 已在超时前成功
+    finishFailure(QStringLiteral("认证超时（%1 秒无响应）")
+                      .arg(PORTAL_SESSION_TIMEOUT / 1000),
+                  /*retryable=*/true);
 }
 
 // ============================================================================
@@ -298,12 +344,54 @@ void PortalProcess::onLogoutFinished(QNetworkReply* reply)
 
 QString PortalProcess::localIpFallback() const
 {
-    // 与参考实现（socket.gethostbyname(hostname)）等价：解析本机主机名取
-    // 第一个非回环 IPv4。认证前校园网 DNS 若未劫持此解析，通常走本地解析成功
-    const QHostInfo info = QHostInfo::fromName(QHostInfo::localHostName());
-    for (const QHostAddress& addr : info.addresses()) {
-        if (addr.protocol() == QAbstractSocket::IPv4Protocol && !addr.isLoopback())
-            return addr.toString();
+    // 非阻塞：直接枚举本机接口（不调用阻塞式主机名 DNS 解析，避免卡住工作线程）。
+    // 无线 Portal 场景优先 Wi-Fi 接口，并排除常见虚拟网卡，避免 VPN/虚拟机
+    // 适配器的 IP 被误当作 wlan_user_ip 导致登录失败。chkstatus 正常时 v46ip
+    // 已是可靠来源，本函数仅在 chkstatus 不可用时兜底。
+    QString best;
+    int bestScore = -1;
+    for (const QNetworkInterface& iface : QNetworkInterface::allInterfaces()) {
+        const QNetworkInterface::InterfaceFlags flags = iface.flags();
+        if (!(flags & QNetworkInterface::IsUp) || (flags & QNetworkInterface::IsLoopBack))
+            continue;
+
+        QString ipv4;
+        bool hasNetmask = false;
+        for (const QNetworkAddressEntry& entry : iface.addressEntries()) {
+            if (entry.ip().protocol() != QAbstractSocket::IPv4Protocol
+                || entry.ip().isLoopback())
+                continue;
+            if (ipv4.isEmpty())
+                ipv4 = entry.ip().toString();
+            if (!entry.netmask().isNull() && entry.netmask().toIPv4Address() != 0)
+                hasNetmask = true;   // 已配置子网 = 实际活动的网络接口
+        }
+        if (ipv4.isEmpty())
+            continue;
+
+        const QString label = iface.name() + QLatin1Char(' ') + iface.humanReadableName();
+        int score = 0;
+        // 无线 Portal 场景：优先 Wi-Fi / WLAN 接口
+        if (label.contains(QStringLiteral("Wi-Fi"), Qt::CaseInsensitive)
+            || label.contains(QStringLiteral("WLAN"), Qt::CaseInsensitive)
+            || label.contains(QStringLiteral("Wireless"), Qt::CaseInsensitive)
+            || label.contains(QStringLiteral("802.11"), Qt::CaseInsensitive))
+            score += 30;
+        if (hasNetmask)
+            score += 20;
+        // 排除常见虚拟/隧道网卡
+        if (label.contains(QStringLiteral("Virtual"), Qt::CaseInsensitive)
+            || label.contains(QStringLiteral("VMware"), Qt::CaseInsensitive)
+            || label.contains(QStringLiteral("VirtualBox"), Qt::CaseInsensitive)
+            || label.contains(QStringLiteral("TAP"), Qt::CaseInsensitive)
+            || label.contains(QStringLiteral("TUN"), Qt::CaseInsensitive)
+            || label.contains(QStringLiteral("VPN"), Qt::CaseInsensitive))
+            score -= 40;
+
+        if (score > bestScore) {
+            bestScore = score;
+            best = ipv4;
+        }
     }
-    return QString();
+    return best;
 }

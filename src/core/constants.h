@@ -169,6 +169,9 @@ constexpr size_t DRCOM_MISC_ALIVE_SIZE = 8;
 
 // 认证超时 & 重发间隔 (ms)
 constexpr int EAP_RETRANSMIT_INTERVAL = 3000;
+// 会话整体超时 (ms)：交换机/服务器持续无有效响应时的兜底，防止无限重发挂死
+// （超时后进入既有自动重连排程，替代"永久停留在认证中"）
+constexpr int EAP_SESSION_TIMEOUT = 60000;
 // "等待交换机响应" 日志节流：每重发多少次才记录一条（默认每 5 次 ≈ 15s 一条）
 constexpr int RETRANSMIT_LOG_INTERVAL = 5;
 // pcap 收包超时 (ms) — 必须为 1ms，配合 20ms 轮询计时器使用
@@ -192,6 +195,9 @@ constexpr const char* DEFAULT_DNS = "202.38.193.33";
 constexpr uint16_t PORTAL_LOGIN_PORT = 801;
 // HTTP 请求超时 (ms)
 constexpr int PORTAL_REQUEST_TIMEOUT = 8000;
+// 会话整体超时 (ms)：chkstatus+login 整条登录链路的最长时限，
+// 超时按暂时性失败进入既有自动重连排程（防网络卡死时无限等待）
+constexpr int PORTAL_SESSION_TIMEOUT = 30000;
 // 在线状态检测周期 (ms) — SCUT Portal 策略为 15 分钟无流量下线，周期检测 + 自动
 // 重登可保持长期在线；周期内正常请求不产生任何日志
 constexpr int PORTAL_KEEPALIVE_INTERVAL = 60 * 1000;

@@ -287,6 +287,33 @@ void EapProcess::start()
         connect(m_pollTimer, &QTimer::timeout, this, &EapProcess::onPollTimeout);
     }
 
+    // 会话整体超时：交换机/服务器持续无有效响应时的兜底，防止无限重发把程序
+    // 永久挂在"认证中"。超时按暂时性失败处理（retryable=true），交由上层
+    // 既有自动重连排程（白天 5 分钟 / 夜间等 6:00）。代数守卫保证 stop/restart
+    // 换代后本定时器作废。
+    QTimer::singleShot(EAP_SESSION_TIMEOUT, this, [this, gen]() {
+        QMutexLocker l(&m_mutex);
+        if (gen != m_startGeneration || !m_running || m_stopRequested)
+            return;
+        if (m_currentState == AuthState::Authenticated)
+            return;   // 已在超时前认证成功
+
+        log(LogLevel::Warning,
+            QStringLiteral("认证超时（%1 秒无有效响应），即将自动重试")
+                .arg(EAP_SESSION_TIMEOUT / 1000));
+        m_stopRequested = true;
+        m_running       = false;
+        if (m_pollTimer)
+            m_pollTimer->stop();
+        closeDevice();
+        m_currentState = AuthState::Failed;
+        deferState(AuthState::Failed, QStringLiteral("认证超时"),
+                   /*retryable=*/true);
+
+        l.unlock();
+        flushPending();
+    });
+
     deferState(AuthState::SendingStart, "清理端口状态...");
     sendEapolLogoff();
 

@@ -755,10 +755,22 @@ void TestPackets::portal_responseClassification()
     QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("流量已用尽")));
     QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("上网时长已用尽")));
 
+    // 英文部署形态 → 同样判定为永久性错误
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("incorrect password")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("user name or password error")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("account not exist")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("This account is disabled")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("account expired")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("insufficient balance")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("traffic used up")));
+
     // 暂时性错误 → 保留自动重试
     QVERIFY(!PortalProtocol::isPermanentFailure(QStringLiteral("IP地址不匹配")));
     QVERIFY(!PortalProtocol::isPermanentFailure(QStringLiteral("认证失败")));
     QVERIFY(!PortalProtocol::isPermanentFailure(QStringLiteral("Some transient error")));
+    // 英文暂时性错误（含 timeout 等）不得被英文关键字误伤
+    QVERIFY(!PortalProtocol::isPermanentFailure(QStringLiteral("request timeout, retry later")));
+    QVERIFY(!PortalProtocol::isPermanentFailure(QStringLiteral("IP not match")));
 }
 
 // ============================================================================

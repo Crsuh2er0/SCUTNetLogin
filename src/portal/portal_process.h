@@ -53,6 +53,7 @@ private:
     void onLoginFinished(QNetworkReply* reply);
     void onLogoutFinished(QNetworkReply* reply);
     void onKeepaliveTimeout();
+    void onSessionTimeout();   // 登录链路整体超时（chkstatus+login 兜底）
 
     // 发起 GET 并连接完成延续；sslErrors 一律忽略（服务器自签证书）
     void sendRequest(const QUrl& url, void (PortalProcess::*onFinished)(QNetworkReply*));
@@ -65,6 +66,7 @@ private:
     AuthConfig m_config;
     QNetworkAccessManager* m_nam = nullptr;   // 惰性创建（首次 start 时，见构造函数注释）
     QTimer* m_keepaliveTimer = nullptr;       // 同上
+    QTimer* m_sessionTimer   = nullptr;       // 登录链路整体超时（同上）
 
     // start/stop 代数：每次会话切换递增，所有异步延续（网络回复）捕获发起时
     // 代数，回调时发现代数不匹配即丢弃——防止旧会话的迟到回复污染新会话状态机

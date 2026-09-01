@@ -117,8 +117,11 @@ bool isAlreadyOnline(const QString& msg)
 bool isPermanentFailure(const QString& msg)
 {
     // 凭证 / 账户状态类关键字：重试无法自愈，应停止自动重连（与有线侧
-    // NotificationParser 的 permanent 语义对齐）
+    // NotificationParser 的 permanent 语义对齐）。
+    // 同时覆盖中英文两种部署形态，避免英文提示（如 "incorrect password"）
+    // 被误判为可重试而无限重试。
     static const char* kPermanentKeywords[] = {
+        // 中文
         "密码",     // 密码错误
         "账号不存在",
         "用户名",   // 用户名错误 / 用户名不存在
@@ -128,9 +131,23 @@ bool isPermanentFailure(const QString& msg)
         "余额",
         "流量",     // 流量已用尽
         "时长",     // 上网时长已用尽
+        // 英文（精确短语，避免误伤 "timeout" 等暂时性错误）
+        "password",       // incorrect/wrong password
+        "user name or password",
+        "not exist",      // account/user not exist
+        "disabled",
+        "expired",
+        "arrears",
+        "balance",        // insufficient balance
+        "traffic",        // traffic/flow used up
+        "quota",
+        "usage",          // usage/时长用尽
     };
+    const QString lower = msg.toLower();
     for (const char* kw : kPermanentKeywords) {
-        if (msg.contains(QString::fromUtf8(kw)))
+        // 关键字含 UTF-8 中文，必须 fromUtf8 解码（fromLatin1 会把中文字节
+        // 按 Latin-1 解释成错误字符导致永远匹配不上）；ASCII 英文两者等价
+        if (lower.contains(QString::fromUtf8(kw)))
             return true;
     }
     return false;
