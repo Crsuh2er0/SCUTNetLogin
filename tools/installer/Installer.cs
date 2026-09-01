@@ -36,12 +36,18 @@ namespace SCUTNetLogin.Setup
 
             if (!IsAdministrator())
             {
-                MessageBox.Show("安装程序需要管理员权限，请右键“以管理员身份运行”。",
+                MessageBox.Show("本程序需要管理员权限，请右键“以管理员身份运行”。",
                                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            if (args != null && args.Length > 0 && args[0].Equals("/uninstall", StringComparison.OrdinalIgnoreCase))
+            // 卸载判定：exe 名为 uninstall.exe（用户双击/设置里卸载），或显式带 /uninstall 参数。
+            // 避免用户双击 uninstall.exe 时不带参数而错进安装界面。
+            string exeName = Path.GetFileNameWithoutExtension(Environment.GetCommandLineArgs()[0]);
+            bool isUninstaller = exeName.Equals("uninstall", StringComparison.OrdinalIgnoreCase)
+                                 || (args != null && args.Length > 0
+                                     && args[0].Equals("/uninstall", StringComparison.OrdinalIgnoreCase));
+            if (isUninstaller)
             {
                 Uninstall();
                 return;
@@ -72,6 +78,10 @@ namespace SCUTNetLogin.Setup
         {
             string appDir = AskUninstallDir();
             if (appDir == null)
+                return;
+
+            if (MessageBox.Show("确定要卸载 " + AppName + " 吗？", AppName,
+                                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 return;
 
             bool keepData = MessageBox.Show(
