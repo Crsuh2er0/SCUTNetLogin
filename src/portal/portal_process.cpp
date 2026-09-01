@@ -52,7 +52,7 @@ void PortalProcess::start()
                 this, &PortalProcess::onKeepaliveTimeout);
         m_sessionTimer = new QTimer(this);
         m_sessionTimer->setSingleShot(true);
-        m_sessionTimer->setInterval(PORTAL_SESSION_TIMEOUT);
+        m_sessionTimer->setInterval(sessionTimeoutMs());
         connect(m_sessionTimer, &QTimer::timeout,
                 this, &PortalProcess::onSessionTimeout);
     }
@@ -66,6 +66,7 @@ void PortalProcess::start()
     }
     m_keepaliveTimer->stop();
     m_sessionTimer->stop();
+    m_keepaliveIntervalMs = PORTAL_KEEPALIVE_INTERVAL;   // 新会话复位保活周期
     m_wasOnline = false;
     m_lastUserIp.clear();
 
@@ -78,9 +79,7 @@ void PortalProcess::start()
     m_sessionTimer->start();
 
     m_keepaliveCheck = false;
-    sendRequest(PortalProtocol::buildChkstatusUrl(
-                    m_config.host, QRandomGenerator::global()->bounded(100000, 999999)),
-                &PortalProcess::onChkstatusFinished);
+    sendRequest(makeChkstatusUrl(), &PortalProcess::onChkstatusFinished);
 }
 
 void PortalProcess::stop()
@@ -104,9 +103,7 @@ void PortalProcess::stop()
         // 注销尽力而为：结果只记日志，不改变状态机（logout 请求不携带会话
         // 代数属性，其迟到回复不被代数守卫拦截）
         emit logMessage(QStringLiteral("正在注销 Portal 会话..."), 0);
-        sendRequest(PortalProtocol::buildLogoutUrl(
-                        m_config.host, QRandomGenerator::global()->bounded(100000, 999999)),
-                    &PortalProcess::onLogoutFinished);
+        sendRequest(makeLogoutUrl(), &PortalProcess::onLogoutFinished);
     }
 
     emit stateChanged(AuthState::Stopped, QString());
@@ -168,9 +165,12 @@ void PortalProcess::onChkstatusFinished(QNetworkReply* reply)
     if (reply->request().attribute(QNetworkRequest::User, -1).toInt() != m_generation)
         return;
 
-    // 网络错误：登录路径回退本机 IP 继续登录；保活路径静默忽略（下次再查）
+    // 网络错误：登录路径回退本机 IP 继续登录；保活路径按指数退避重排，避免
+    // 服务器短暂不可达时每 60s 打一个无效请求
     if (reply->error() != QNetworkReply::NoError) {
-        if (!m_keepaliveCheck) {
+        if (m_keepaliveCheck) {
+            backoffKeepalive();
+        } else {
             emit logMessage(QStringLiteral("在线状态查询失败（%1），尝试直接登录...")
                                 .arg(reply->errorString()), 1);
             m_lastUserIp = localIpFallback();
@@ -183,7 +183,9 @@ void PortalProcess::onChkstatusFinished(QNetworkReply* reply)
         PortalProtocol::parseJsonp(reply->readAll(), QStringLiteral("dr1002"));
 
     if (!resp.valid) {
-        if (!m_keepaliveCheck) {
+        if (m_keepaliveCheck) {
+            backoffKeepalive();
+        } else {
             emit logMessage(QStringLiteral("无法解析在线状态响应，尝试直接登录..."), 1);
             m_lastUserIp = localIpFallback();
             beginLogin();
@@ -192,10 +194,13 @@ void PortalProcess::onChkstatusFinished(QNetworkReply* reply)
     }
 
     if (resp.result == 1) {
-        // 已在线：登录路径直接成功；保活路径无事（顺带刷新缓存 IP）
+        // 已在线：登录路径直接成功；保活路径复位周期并刷新缓存 IP
         m_lastUserIp = resp.v46ip;
-        if (!m_keepaliveCheck)
+        if (!m_keepaliveCheck) {
             finishSuccess(QStringLiteral("账号已在线"));
+        } else {
+            resetKeepalive();
+        }
         return;
     }
 
@@ -204,6 +209,22 @@ void PortalProcess::onChkstatusFinished(QNetworkReply* reply)
         emit logMessage(QStringLiteral("检测到 Portal 会话掉线，自动重新登录..."), 1);
     m_lastUserIp = resp.v46ip.isEmpty() ? localIpFallback() : resp.v46ip;
     beginLogin();
+}
+
+// 保活失败退避：当前周期翻倍（封顶 PORTAL_KEEPALIVE_MAX_INTERVAL）并重排下一轮
+void PortalProcess::backoffKeepalive()
+{
+    m_keepaliveIntervalMs = qMin(m_keepaliveIntervalMs * 2, PORTAL_KEEPALIVE_MAX_INTERVAL);
+    if (m_keepaliveTimer)
+        m_keepaliveTimer->start(m_keepaliveIntervalMs);
+}
+
+// 保活成功复位：恢复正常周期
+void PortalProcess::resetKeepalive()
+{
+    m_keepaliveIntervalMs = PORTAL_KEEPALIVE_INTERVAL;
+    if (m_keepaliveTimer)
+        m_keepaliveTimer->start(m_keepaliveIntervalMs);
 }
 
 // ============================================================================
@@ -223,10 +244,7 @@ void PortalProcess::beginLogin()
     if (m_sessionTimer)
         m_sessionTimer->start();
 
-    sendRequest(PortalProtocol::buildLoginUrl(
-                    m_config.host, m_config.username, m_config.password, m_lastUserIp,
-                    QRandomGenerator::global()->bounded(100000, 999999)),
-                &PortalProcess::onLoginFinished);
+    sendRequest(makeLoginUrl(), &PortalProcess::onLoginFinished);
 }
 
 void PortalProcess::onLoginFinished(QNetworkReply* reply)
@@ -278,7 +296,9 @@ void PortalProcess::finishSuccess(const QString& reason)
         m_sessionTimer->stop();   // 已成功：停止登录链路超时
     m_wasOnline = true;
     setCurrentState(AuthState::Authenticated);
-    m_keepaliveTimer->start();
+    // 成功：复位保活周期并启动在线检测
+    m_keepaliveIntervalMs = PORTAL_KEEPALIVE_INTERVAL;
+    m_keepaliveTimer->start(m_keepaliveIntervalMs);
     emit stateChanged(AuthState::Authenticated, reason);
     emit portalSuccess();
 }
@@ -302,9 +322,10 @@ void PortalProcess::finishFailure(const QString& msg, bool retryable)
 void PortalProcess::onKeepaliveTimeout()
 {
     m_keepaliveCheck = true;
-    sendRequest(PortalProtocol::buildChkstatusUrl(
-                    m_config.host, QRandomGenerator::global()->bounded(100000, 999999)),
-                &PortalProcess::onChkstatusFinished);
+    // 先按当前周期排下一轮（失败时由 backoffKeepalive 覆盖为退避间隔）
+    if (m_keepaliveTimer)
+        m_keepaliveTimer->start(m_keepaliveIntervalMs);
+    sendRequest(makeChkstatusUrl(), &PortalProcess::onChkstatusFinished);
 }
 
 void PortalProcess::onSessionTimeout()
@@ -336,6 +357,34 @@ void PortalProcess::onLogoutFinished(QNetworkReply* reply)
     emit logMessage(ok ? QStringLiteral("Portal 会话已注销")
                        : QStringLiteral("Portal 注销响应异常（已忽略）"),
                     ok ? 0 : 1);
+}
+
+// ============================================================================
+// 端点构造（默认实现：真实 eportal URL；测试子类覆写指向本地 mock）
+// ============================================================================
+
+QUrl PortalProcess::makeChkstatusUrl() const
+{
+    return PortalProtocol::buildChkstatusUrl(
+        m_config.host, QRandomGenerator::global()->bounded(100000, 999999));
+}
+
+QUrl PortalProcess::makeLoginUrl() const
+{
+    return PortalProtocol::buildLoginUrl(
+        m_config.host, m_config.username, m_config.password, m_lastUserIp,
+        QRandomGenerator::global()->bounded(100000, 999999));
+}
+
+QUrl PortalProcess::makeLogoutUrl() const
+{
+    return PortalProtocol::buildLogoutUrl(
+        m_config.host, QRandomGenerator::global()->bounded(100000, 999999));
+}
+
+int PortalProcess::sessionTimeoutMs() const
+{
+    return PORTAL_SESSION_TIMEOUT;
 }
 
 // ============================================================================

@@ -102,12 +102,12 @@ void UdpProcess::flushPending()
 void UdpProcess::sendUdpPacket(const char* data, size_t len)
 {
     qint64 written = m_socket->write(data, static_cast<qint64>(len));
-    // 发送失败/部分发送【静默】处理：
+    // 发送失败/未发出（write 返回 0）【静默】处理：
     // 本网络环境服务器不响应 UDP 心跳属常见现象（不影响上网），且心跳失败在
     // 上层本就是有意忽略（见 SessionManager::onHeartbeatFailed()），因此不在
     // 界面日志打任何发送失败信息（此前"UDP 部分发送 0/N"刷屏且无诊断价值）。
     // 仅保留超时判定的既有机制（onHeartbeatTimeout，同样静默）。
-    if (written < 0)
+    if (written <= 0)
         return;
     m_timeoutTimer->start();
 }

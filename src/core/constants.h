@@ -201,6 +201,9 @@ constexpr int PORTAL_SESSION_TIMEOUT = 30000;
 // 在线状态检测周期 (ms) — SCUT Portal 策略为 15 分钟无流量下线，周期检测 + 自动
 // 重登可保持长期在线；周期内正常请求不产生任何日志
 constexpr int PORTAL_KEEPALIVE_INTERVAL = 60 * 1000;
+// 保活检测失败时的退避上限 (ms)：服务器短暂不可达时逐次翻倍（60s→…→10min），
+// 避免网络抖动期间每 60s 打一个无效请求；恢复后复位到正常周期
+constexpr int PORTAL_KEEPALIVE_MAX_INTERVAL = 10 * 60 * 1000;
 // eportal JS 版本（SCUT 部署为 3.x）
 constexpr const char* PORTAL_JS_VERSION = "3.3.2";
 // 伪装浏览器 UA（eportal 服务端会校验 User-Agent）

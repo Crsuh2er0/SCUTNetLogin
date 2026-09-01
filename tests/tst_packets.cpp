@@ -10,12 +10,19 @@
 #include "config/config_manager.h"
 #include "config/credential.h"
 #include "portal/portal_protocol.h"
+#include "portal/portal_process.h"
 #include "network/network.h"
 
 #include <QTemporaryDir>
 #include <QSettings>
 #include <QDir>
 #include <QNetworkInterface>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QSignalSpy>
+
+// 供 QSignalSpy 捕获 PortalProcess::stateChanged 的 AuthState 参数
+Q_DECLARE_METATYPE(AuthState)
 
 // ============================================================================
 // 测试桩：ConfigManager::resolveAuthConfig 引用了 Network::findInterface（生产实现在
@@ -1026,5 +1033,259 @@ void TestPackets::configManager_legacyBase64Fallback()
     QDir(workDir).removeRecursively();
 }
 
-QTEST_APPLESS_MAIN(TestPackets)
+// ============================================================================
+// 无线 Portal 状态机集成测试
+//
+// 用本地 QTcpServer 模拟 eportal 服务器，PortalProcess 子类覆写端点 seam
+// （makeChkstatusUrl/makeLoginUrl/makeLogoutUrl/sessionTimeoutMs）指向 mock，
+// 从而在不接触真实网络的前提下驱动完整异步状态机（含代数守卫、超时、
+// 已在线兜底、永久性错误停止重试）。
+// ============================================================================
+
+namespace {
+
+// 本地 eportal mock：按请求 query 的 callback 参数返回对应 JSONP
+class MockEportal : public QTcpServer {
+    Q_OBJECT
+public:
+    enum class ChkStatus { Offline, Online };
+    enum class LoginResult { Success, AlreadyOnline, PermanentFail, RetryableFail };
+
+    bool start() { return listen(QHostAddress::LocalHost, 0); }
+
+    void setChkStatus(ChkStatus s) { m_chk = s; }
+    void setLoginResult(LoginResult r) { m_login = r; }
+    void setHang(bool h) { m_hang = h; }   // true = 收到请求不响应（模拟超时）
+
+    int loginRequests() const { return m_loginRequests; }
+    int logoutRequests() const { return m_logoutRequests; }
+
+protected:
+    void incomingConnection(qintptr descriptor) override
+    {
+        auto* socket = new QTcpSocket(this);
+        socket->setSocketDescriptor(descriptor);
+        connect(socket, &QTcpSocket::readyRead, this, [this, socket]() { handleRequest(socket); });
+        connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+    }
+
+private:
+    void handleRequest(QTcpSocket* socket)
+    {
+        const QByteArray req = socket->readAll();
+        const int lineEnd = req.indexOf("\r\n");
+        if (lineEnd < 0)
+            return;
+        // 请求行: GET /path?query HTTP/1.1（用 QString 解析，QByteArray 无 section）
+        const QString line = QString::fromLatin1(req.left(lineEnd));
+        const QString target = line.section(QLatin1Char(' '), 1, 1);
+        const int q = target.indexOf(QLatin1Char('?'));
+        const QString path = q >= 0 ? target.left(q) : target;
+
+        // 按路径识别请求（harness 注入的端点可能不含 query，故不依赖 callback 参数）
+        QByteArray body;
+        if (path.contains(QStringLiteral("/drcom/chkstatus"))) {
+            body = m_chk == ChkStatus::Online
+                ? QByteArrayLiteral("dr1002({\"result\":1,\"v46ip\":\"172.16.0.2\"})")
+                : QByteArrayLiteral("dr1002({\"result\":0,\"v46ip\":\"172.16.0.2\"})");
+        } else if (path.startsWith(QStringLiteral("/eportal/"))) {
+            ++m_loginRequests;
+            switch (m_login) {
+            case LoginResult::Success:       body = QByteArrayLiteral("dr1003({\"result\":1,\"msg\":\"Portal协议认证成功\"})"); break;
+            case LoginResult::AlreadyOnline: body = QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"该账号已经在线\"})"); break;
+            case LoginResult::PermanentFail: body = QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"密码错误\"})"); break;
+            case LoginResult::RetryableFail: body = QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"暂时无法认证\"})"); break;
+            }
+        } else if (path.contains(QStringLiteral("/drcom/logout"))) {
+            ++m_logoutRequests;
+            body = QByteArrayLiteral("dr1006({\"result\":1,\"ss5\":\"172.16.0.2\"})");
+        }
+
+        if (m_hang)   // 模拟无响应（用于会话超时用例）
+            return;
+
+        const QByteArray resp =
+            QByteArrayLiteral("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: ")
+            + QByteArray::number(body.size())
+            + QByteArrayLiteral("\r\nConnection: close\r\n\r\n") + body;
+        socket->write(resp);
+        socket->flush();
+        socket->disconnectFromHost();
+    }
+
+    ChkStatus m_chk = ChkStatus::Offline;
+    LoginResult m_login = LoginResult::Success;
+    bool m_hang = false;
+    int m_loginRequests = 0;
+    int m_logoutRequests = 0;
+};
+
+// 覆写端点 seam 指向 mock 服务器的 PortalProcess 子类
+class TestablePortal : public PortalProcess {
+    Q_OBJECT
+public:
+    void setEndpoints(QUrl chk, QUrl login, QUrl logout)
+    {
+        m_chk = std::move(chk);
+        m_login = std::move(login);
+        m_logout = std::move(logout);
+    }
+    void setSessionTimeout(int ms) { m_timeoutMs = ms; }
+
+protected:
+    QUrl makeChkstatusUrl() const override { return m_chk; }
+    QUrl makeLoginUrl() const override { return m_login; }
+    QUrl makeLogoutUrl() const override { return m_logout; }
+    int sessionTimeoutMs() const override { return m_timeoutMs; }
+
+private:
+    QUrl m_chk;
+    QUrl m_login;
+    QUrl m_logout;
+    int m_timeoutMs = 600;   // 测试默认缩短会话超时，避免等待真实 30s
+};
+
+// 构建指向指定 mock 端点的测试门户
+struct TestPortalHarness {
+    MockEportal server;
+    TestablePortal portal;
+    QSignalSpy stateSpy;
+    QSignalSpy successSpy;
+
+    TestPortalHarness()
+        : stateSpy(&portal, &PortalProcess::stateChanged)
+        , successSpy(&portal, &PortalProcess::portalSuccess)
+    {
+        server.start();   // 先绑定随机端口，port() 才有效
+        AuthConfig cfg;
+        cfg.username = QStringLiteral("stu2026");
+        cfg.password = QStringLiteral("secret");
+        cfg.host = QStringLiteral("mock.local");
+        portal.setConfig(cfg);
+        portal.setSessionTimeout(600);
+        portal.setEndpoints(
+            QUrl(QStringLiteral("http://127.0.0.1:%1/drcom/chkstatus?callback=dr1002").arg(server.serverPort())),
+            QUrl(QStringLiteral("http://127.0.0.1:%1/eportal/").arg(server.serverPort())),
+            QUrl(QStringLiteral("http://127.0.0.1:%1/drcom/logout?callback=dr1006").arg(server.serverPort())));
+    }
+};
+
+// 断言最后一次 stateChanged 为给定状态
+bool lastStateIs(const QSignalSpy& spy, AuthState expected)
+{
+    if (spy.isEmpty())
+        return false;
+    return spy.last().at(0).value<AuthState>() == expected;
+}
+
+} // namespace
+
+class PortalIntegration : public QObject {
+    Q_OBJECT
+
+private slots:
+    void loginSuccessFlow();
+    void alreadyOnlineFlow();
+    void alreadyOnlineFromLogin();
+    void permanentFailureStopsRetry();
+    void retryableFailure();
+    void sessionTimeout();
+};
+
+void PortalIntegration::loginSuccessFlow()
+{
+    TestPortalHarness h;
+    QVERIFY(h.server.isListening());
+    h.server.setChkStatus(MockEportal::ChkStatus::Offline);
+    h.server.setLoginResult(MockEportal::LoginResult::Success);
+
+    h.portal.start();
+    QVERIFY(h.successSpy.wait(3000));   // 等待 portalSuccess
+    QCOMPARE(h.successSpy.count(), 1);
+    QVERIFY(lastStateIs(h.stateSpy, AuthState::Authenticated));
+    QCOMPARE(h.server.loginRequests(), 1);   // 未在线 → 登录一次
+
+    // 断开：应触发 logout
+    h.portal.stop();
+    QTRY_VERIFY_WITH_TIMEOUT(h.server.logoutRequests() == 1, 3000);
+}
+
+void PortalIntegration::alreadyOnlineFlow()
+{
+    TestPortalHarness h;
+    QVERIFY(h.server.isListening());
+    h.server.setChkStatus(MockEportal::ChkStatus::Online);   // chkstatus 直接已在线
+
+    h.portal.start();
+    QVERIFY(h.successSpy.wait(3000));
+    QVERIFY(lastStateIs(h.stateSpy, AuthState::Authenticated));
+    QCOMPARE(h.server.loginRequests(), 0);   // 已在线 → 无需登录
+}
+
+void PortalIntegration::alreadyOnlineFromLogin()
+{
+    // 掉线重登竞态：chkstatus 未在线，但 login 返回"已在线" → 同样按成功
+    TestPortalHarness h;
+    QVERIFY(h.server.isListening());
+    h.server.setChkStatus(MockEportal::ChkStatus::Offline);
+    h.server.setLoginResult(MockEportal::LoginResult::AlreadyOnline);
+
+    h.portal.start();
+    QVERIFY(h.successSpy.wait(3000));
+    QVERIFY(lastStateIs(h.stateSpy, AuthState::Authenticated));
+}
+
+void PortalIntegration::permanentFailureStopsRetry()
+{
+    TestPortalHarness h;
+    QVERIFY(h.server.isListening());
+    h.server.setChkStatus(MockEportal::ChkStatus::Offline);
+    h.server.setLoginResult(MockEportal::LoginResult::PermanentFail);   // 密码错误
+
+    h.portal.start();
+    // 轮询到最终 Failed（wait() 会在中间态 SendingIdentity 就返回，故用 QTRY_VERIFY）
+    QTRY_VERIFY_WITH_TIMEOUT(lastStateIs(h.stateSpy, AuthState::Failed), 3000);
+    QVERIFY(!h.stateSpy.last().at(2).toBool());   // retryable == false
+    QCOMPARE(h.successSpy.count(), 0);            // 不触发成功
+}
+
+void PortalIntegration::retryableFailure()
+{
+    TestPortalHarness h;
+    QVERIFY(h.server.isListening());
+    h.server.setChkStatus(MockEportal::ChkStatus::Offline);
+    h.server.setLoginResult(MockEportal::LoginResult::RetryableFail);
+
+    h.portal.start();
+    QTRY_VERIFY_WITH_TIMEOUT(lastStateIs(h.stateSpy, AuthState::Failed), 3000);
+    QVERIFY(h.stateSpy.last().at(2).toBool());   // retryable == true（可自动重试）
+}
+
+void PortalIntegration::sessionTimeout()
+{
+    TestPortalHarness h;
+    QVERIFY(h.server.isListening());
+    h.server.setChkStatus(MockEportal::ChkStatus::Offline);
+    h.server.setHang(true);   // 服务器不响应 → 触发会话整体超时
+
+    h.portal.start();
+    QTRY_VERIFY_WITH_TIMEOUT(lastStateIs(h.stateSpy, AuthState::Failed), 4000);
+    QVERIFY(h.stateSpy.last().at(2).toBool());   // retryable == true（可自动重试）
+}
+
+int main(int argc, char* argv[])
+{
+    QCoreApplication app(argc, argv);
+    int rc = 0;
+    {
+        TestPackets t;
+        rc |= QTest::qExec(&t, argc, argv);
+    }
+    {
+        PortalIntegration t;
+        rc |= QTest::qExec(&t, argc, argv);
+    }
+    return rc;
+}
+
 #include "tst_packets.moc"

@@ -37,6 +37,15 @@ public:
     // 保证工作线程处理 start 槽时已持有最新配置）
     void setConfig(const AuthConfig& config);
 
+protected:
+    // ---- 端点构造 seam（可测性）：默认按 portal_protocol 构造真实 eportal URL。
+    //      测试子类可覆写指向本地 mock 服务器、缩短超时，从而在不接触真实网络的
+    //      前提下驱动整个异步状态机（见 tests/tst_packets.cpp 的 Portal 集成用例）----
+    virtual QUrl makeChkstatusUrl() const;
+    virtual QUrl makeLoginUrl() const;
+    virtual QUrl makeLogoutUrl() const;
+    virtual int  sessionTimeoutMs() const;   // 登录链路超时（测试可缩短）
+
 public slots:
     void start();    // 查询在线状态 → 已在线直接成功 / 未在线登录
     void stop();     // 注销并停止保活，发射 Stopped
@@ -60,7 +69,9 @@ private:
     void beginLogin();                              // chkstatus 完成后进入登录
     void finishSuccess(const QString& reason);      // 成功终点（启动保活）
     void finishFailure(const QString& msg, bool retryable);
-    QString localIpFallback() const;                // 主机名解析回退取本机 IPv4
+    void backoffKeepalive();                        // 保活检测失败：周期翻倍退避
+    void resetKeepalive();                          // 保活检测成功：复位正常周期
+    QString localIpFallback() const;                // 本机 IPv4 回退（非阻塞枚举）
     void setCurrentState(AuthState state) { m_currentState = state; }
 
     AuthConfig m_config;
@@ -75,6 +86,8 @@ private:
     // 本次 chkstatus 的用途：false = 登录前置查询 / true = 保活周期检测
     // （两者对 result 的处理不同：已在线时登录路径视为成功，保活路径无事）
     bool m_keepaliveCheck = false;
+    // 保活当前周期 (ms)：检测失败指数退避（60s→…→10min），成功复位到正常周期
+    int m_keepaliveIntervalMs = 0;
 
     AuthState m_currentState = AuthState::Idle;
     QString   m_lastUserIp;          // chkstatus 获取的本机 IP（login 参数）
