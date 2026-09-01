@@ -1,18 +1,20 @@
-# SCUTNetLogin — 华南理工大学校园网有线认证客户端
+# SCUTNetLogin — 华南理工大学校园网认证客户端
 
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue)](https://github.com/YiZhiQvQ/SCUTNetLogin)
 [![Qt](https://img.shields.io/badge/Qt-6.11.0-green)](https://www.qt.io/)
 [![License](https://img.shields.io/badge/license-MIT-orange)](LICENSE)
 
-华南理工大学（SCUT）校园网有线 802.1X 认证客户端，支持 DrCOM 会话保持、系统托盘后台运行、断线自动重连。
+华南理工大学（SCUT）校园网认证客户端，支持**有线 802.1X** 与**无线 Portal** 两种认证方式，支持 DrCOM 会话保持、系统托盘后台运行、断线自动重连。
 
 ---
 
 ## 功能特性
 
-- **802.1X EAP-MD5 认证**（Ruijie/H3C/DrCOM 私有扩展）
-- **DrCOM UDP 心跳保活**（MiscAlive → MiscInfo → Alive 协议）
-- **静态 IP 自动配置**：认证前设置静态 IP/DNS，断开后恢复 DHCP
+- **有线 802.1X EAP-MD5 认证**（Ruijie/H3C/DrCOM 私有扩展）
+- **无线 Portal 自动认证**（`s.scut.edu.cn` DrCOM eportal）：无需打开浏览器，程序自动完成
+  状态查询 → 登录 → 在线保活全流程；掉线自动重新登录
+- **DrCOM UDP 心跳保活**（MiscAlive → MiscInfo → Alive 协议，有线模式）
+- **静态 IP 自动配置**：认证前设置静态 IP/DNS，断开后恢复 DHCP（有线模式）
 - **断线自动重连**：被服务器踢下线后自动重试（夜间 0:00-6:00 等待至 6:00，其余时段每 5 分钟重试）
 - **系统托盘后台运行**：最小化到托盘，开机自启动
 - **日志持久化**：按日轮转写入 `log/SCUTNetLogin_YYYY-MM-DD.log`
@@ -24,16 +26,16 @@
 
 主界面分「连接」与「设置」两个分段式标签：
 
-- **连接**：顶部状态指示器 + 状态文案；账号 / 密码（回车即连接）；主按钮「连接」与「断开」；底部深色运行日志（一键复制 / 清空）
-- **设置**：网络与网卡配置（网卡刷新、MAC、静态 IP/DNS）、认证服务器、自动化（开机自启动 / 启动后自动连接）、保存配置
+- **连接**：顶部状态指示器 + 状态文案；认证方式（有线 802.1X / 无线 Portal）；账号 / 密码（回车即连接）；主按钮「连接」与「断开」；底部深色运行日志（一键复制 / 清空）
+- **设置**：网络与网卡配置（网卡刷新、MAC、静态 IP/DNS，仅有线模式生效）、认证服务器、自动化（开机自启动 / 启动后自动连接）、保存配置
 
 ---
 
 ## 环境要求
 
 - Windows 10 / 11 x64
-- [Npcap](https://npcap.com/)（安装时勾选 **"Support raw 802.1X traffic"**）
-- 管理员权限（发送原始 802.1X 以太网帧需要）
+- [Npcap](https://npcap.com/)（安装时勾选 **"Support raw 802.1X traffic"**）— 仅有线 802.1X 模式需要
+- 管理员权限（有线模式发送原始 802.1X 以太网帧需要；无线 Portal 模式仅走普通 HTTPS，无此要求）
 
 > WinPcap 不支持，必须安装 Npcap。
 
@@ -41,11 +43,24 @@
 
 ## 使用说明
 
+### 有线（宿舍网口）
+
 1. **以管理员身份运行**程序
-2. 填写校园网账号（学号）和密码
-3. 选择对应的有线网卡，程序会自动检测 IP、子网掩码、网关、MAC
-4. 如需静态 IP，勾选「连接时配置静态IP，断开时恢复DHCP」并填写网络参数
-5. 点击**连接**
+2. 认证方式选择「有线 802.1X」
+3. 填写校园网账号（学号）和密码
+4. 选择对应的有线网卡，程序会自动检测 IP、子网掩码、网关、MAC
+5. 如需静态 IP，勾选「连接时配置静态IP，断开时恢复DHCP」并填写网络参数
+6. 点击**连接**
+
+### 无线（scut-student 等 SSID）
+
+1. 先在系统中连接校园网 Wi-Fi（如 `scut-student`）
+2. 认证方式选择「无线 Portal」
+3. 填写校园网账号（学号）和密码，点击**连接**
+
+程序自动通过门户 `https://s.scut.edu.cn/` 完成 DrCOM eportal 认证（无需打开浏览器），
+认证成功后每 60 秒检测在线状态，被踢下线（如 15 分钟无流量）会自动重新登录保持在线。
+无线模式下网卡 / MAC / 静态 IP 等有线专属配置自动禁用，仅需账号密码与认证服务器地址。
 
 连接成功后程序可最小化到系统托盘后台运行。被服务器夜间强制踢下线后会自动等待到早上 6:00 重连。
 
@@ -64,14 +79,15 @@
 
 | 配置项 | 说明 |
 |--------|------|
+| 认证方式 | 有线 802.1X（宿舍网口）/ 无线 Portal（Wi-Fi） |
 | 账号 / 密码 | 校园网统一认证账号和密码 |
 | 记住密码 | 密码经 Windows DPAPI 加密后保存在程序目录下的 `config.ini` |
-| 网卡 | 选择用于认证的有线网卡，点击刷新重新扫描 |
+| 网卡 | 选择用于认证的有线网卡，点击刷新重新扫描（仅有线模式） |
 | MAC 地址 | 留空自动获取 |
 | IPv4 地址 / 子网掩码 / 默认网关 | 静态 IP 参数（勾选静态 IP 时必填） |
 | 主 DNS / 备用 DNS | 默认 `202.38.193.33` |
-| 认证服务器 | 默认 `s.scut.edu.cn` |
-| 连接时配置静态IP | 认证前设置静态 IP/DNS，断开后恢复 DHCP |
+| 认证服务器 | 默认 `s.scut.edu.cn`（有线 802.1X 与无线 Portal 共用） |
+| 连接时配置静态IP | 认证前设置静态 IP/DNS，断开后恢复 DHCP（仅有线模式） |
 | 开机自启动 | 通过 Windows 计划任务实现（`schtasks`） |
 | 启动后自动连接 | 打开程序自动发起认证 |
 
@@ -108,12 +124,13 @@
 
 ## 配置文件
 
-配置保存在程序同目录下的 `config.ini`：
+配置保存在程序同目录下的 `config.ini`（**含 DPAPI 加密的密码，已被 .gitignore 忽略，严禁提交**）：
 
 ```ini
 [General]
 username=你的学号
 password=<Base64(DPAPI密文)>
+authMode=wired
 host=s.scut.edu.cn
 dns=202.38.193.33
 interface=\Device\NPF_{GUID}
@@ -153,7 +170,7 @@ powershell -File tools\installer\build_installer.ps1
 ### 单元测试
 
 协议纯函数（封包构造 / 帧解析 / 校验和 / 加解密 / 字节工具 / 连接校验 / 服务器通知解析 /
-配置回环）有 QtTest 回归护栏，全量测试用例见 `tests/tst_packets.cpp`：
+Portal URL 构造与 JSONP 解析 / 配置回环）有 QtTest 回归护栏，全量测试用例见 `tests/tst_packets.cpp`：
 
 ```
 cd tests
@@ -170,8 +187,8 @@ CI（GitHub Actions）在每次推送/PR 时自动构建并运行同一套测试
 ```
 src/
 ├── main.cpp              # 入口：管理员权限检查、单实例、静默启动
-├── mainwindow.cpp/h      # UI：布局、系统托盘、网卡列表、配置
-├── session_manager.cpp/h # 连接编排：状态机、线程管理、自动重连
+├── mainwindow.cpp/h      # UI：布局、系统托盘、网卡列表、认证方式切换、配置
+├── session_manager.cpp/h # 连接编排：状态机、线程管理、自动重连（有线/无线分支）
 ├── connection_builder.cpp/h # 连接前校验（纯逻辑，无 pcap/UI 依赖）
 ├── byte_utils.cpp/h      # 字节工具纯函数（MAC/IP 归一化等）
 ├── deferred_signals.h    # 工作线程"持锁缓冲信号、解锁统一发射"共享队列
@@ -179,13 +196,15 @@ src/
 ├── eap_process.cpp/h     # 802.1X EAPOL 握手（pcap 原始套接字）
 ├── notification_parser.cpp/h # 服务器通知解析（纯函数，数据驱动查表）
 ├── udp_process.cpp/h     # DrCOM UDP 心跳协议
+├── portal_process.cpp/h  # 无线 Portal 认证流程（HTTP 异步状态机 + 在线保活）
+├── portal_protocol.cpp/h # 无线 Portal 协议纯函数（URL 构造 / JSONP 解析 / 响应分类）
 ├── network_worker.cpp/h  # netsh/schtasks 后台线程
 ├── network.cpp/h         # 网卡枚举、MAC/IP 工具、netsh 封装
 ├── config_manager.cpp/h  # config.ini 读写、AuthConfig 组装
 ├── eapol_packet.cpp/h    # EAPOL 帧构造 + EAP 帧解析（纯数据，无 I/O）
 ├── drcom_packet.cpp/h    # DrCOM UDP 包构造 + 校验和（纯数据）
 ├── log_manager.cpp/h     # 日志文件持久化（按日轮转）
-├── protocol.h            # 协议结构体 + AuthConfig/AuthState + StaticIpConfig
+├── protocol.h            # 协议结构体 + AuthMode/AuthConfig/AuthState + StaticIpConfig
 └── constants.h           # 所有协议常量、魔数、偏移量
 
 res/                     # 资源：style.qss（界面样式）、resources.qrc、SCUTnetwork.ico、check.svg

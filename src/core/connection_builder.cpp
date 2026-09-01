@@ -27,20 +27,26 @@ Result build(const Input& in)
 {
     Result r;
 
-    // 1. 回环网卡拒绝（认证前先拦截）
+    // 1. 空凭证校验（避免发出空用户名/空密码的认证包，服务器端必然拒绝）
+    if (in.username.trimmed().isEmpty() || in.password.isEmpty()) {
+        r.error = QStringLiteral("用户名或密码不能为空，请检查认证配置");
+        return r;
+    }
+
+    // 2. 无线 Portal 模式：仅走 HTTP 认证，不依赖网卡/静态IP，校验到此为止
+    if (in.wireless) {
+        r.ok = true;
+        return r;
+    }
+
+    // 3. 回环网卡拒绝（认证前先拦截）
     if (in.displayText.contains(QStringLiteral("Loopback"), Qt::CaseInsensitive)
         || in.pcapName.contains(QStringLiteral("Loopback"), Qt::CaseInsensitive)) {
         r.error = QStringLiteral("错误：当前选中的是虚拟回环网卡，无法用于认证！");
         return r;
     }
 
-    // 2. 空凭证校验（避免发出空用户名/空密码的认证包，服务器端必然拒绝）
-    if (in.username.trimmed().isEmpty() || in.password.isEmpty()) {
-        r.error = QStringLiteral("用户名或密码不能为空，请检查认证配置");
-        return r;
-    }
-
-    // 3. 静态 IP 配置分支
+    // 4. 静态 IP 配置分支
     if (in.autoSetNetwork) {
         if (in.mac.isEmpty()) {
             r.error = QStringLiteral("无法获取网卡MAC地址，静态IP配置失败。请手动填写MAC地址或取消静态IP配置。");
@@ -62,7 +68,7 @@ Result build(const Input& in)
             return r;
         }
 
-        // 4. IPv4 格式校验（netsh 对非法地址的报错晦涩难懂，前置拦截）
+        // 5. IPv4 格式校验（netsh 对非法地址的报错晦涩难懂，前置拦截）
         QStringList invalid;
         if (!isValidIPv4(in.ip))      invalid << QStringLiteral("IPv4地址");
         if (!isValidIPv4(in.mask))    invalid << QStringLiteral("子网掩码");

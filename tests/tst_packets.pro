@@ -34,7 +34,8 @@ SOURCES += \
     ../src/core/byte_utils.cpp \
     ../src/core/connection_builder.cpp \
     ../src/config/config_manager.cpp \
-    ../src/config/credential.cpp
+    ../src/config/credential.cpp \
+    ../src/portal/portal_protocol.cpp
 
 HEADERS += \
     ../src/eap/eapol_packet.h \
@@ -46,4 +47,5 @@ HEADERS += \
     ../src/core/constants.h \
     ../src/core/deferred_signals.h \
     ../src/config/config_manager.h \
-    ../src/config/credential.h
+    ../src/config/credential.h \
+    ../src/portal/portal_protocol.h

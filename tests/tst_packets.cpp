@@ -9,6 +9,7 @@
 #include "eap/notification_parser.h"
 #include "config/config_manager.h"
 #include "config/credential.h"
+#include "portal/portal_protocol.h"
 #include "network/network.h"
 
 #include <QTemporaryDir>
@@ -134,12 +135,18 @@ private slots:
     void build_invalidIpRejected();
     void build_staticIpOk();
     void build_noStaticIpOk();
+    void build_wirelessMode();
 
     // ---------- NotificationParser ----------
     void notificationParser_knownCodes();
     void notificationParser_simpleErrors();
     void notificationParser_unknown();
     void notificationParser_edgeCases();
+
+    // ---------- PortalProtocol（无线 Portal / DrCOM eportal） ----------
+    void portal_buildUrls();
+    void portal_parseJsonp();
+    void portal_responseClassification();
 
     // ---------- DeferredSignalQueue ----------
     void deferredQueue_order();
@@ -558,6 +565,27 @@ void TestPackets::build_noStaticIpOk()
     QVERIFY(!r.needStaticIp);
 }
 
+void TestPackets::build_wirelessMode()
+{
+    // 无线模式：跳过回环网卡拒绝 + 静态IP校验，仅凭证校验
+    auto in = makeConnectInput();
+    in.wireless = true;
+    in.displayText = QStringLiteral("Loopback pseudo");   // 有线会被拒绝
+    in.pcapName = QStringLiteral("Loopback");
+    in.autoSetNetwork = true;   // 无线模式下该开关被忽略
+    auto r = ConnectionBuilder::build(in);
+    QVERIFY(r.ok);
+    QVERIFY(!r.needStaticIp);
+
+    // 凭证缺失仍然拦截
+    in = makeConnectInput();
+    in.wireless = true;
+    in.username = QStringLiteral("  ");
+    r = ConnectionBuilder::build(in);
+    QVERIFY(!r.ok);
+    QVERIFY(r.error.contains(QStringLiteral("用户名或密码")));
+}
+
 // ============================================================================
 // NotificationParser
 // ============================================================================
@@ -625,6 +653,112 @@ void TestPackets::notificationParser_unknown()
     // prefix 匹配但 code 未知 → 不再尝试其他 pattern，同样视为未识别
     r = NotificationParser::describe(QStringLiteral("userid error 999"));
     QVERIFY(r.description.isEmpty());
+}
+
+// ============================================================================
+// PortalProtocol（无线 Portal / DrCOM eportal）
+// ============================================================================
+
+void TestPackets::portal_buildUrls()
+{
+    // chkstatus：443 + /drcom/chkstatus + dr1002 回调
+    // （断言用 FullyEncoded：PrettyDecoded 可能把 %XX 解码为字面字符，不稳定）
+    const auto chk = PortalProtocol::buildChkstatusUrl(QStringLiteral("s.scut.edu.cn"), 12345);
+    QCOMPARE(chk.toString(QUrl::FullyEncoded),
+             QStringLiteral("https://s.scut.edu.cn/drcom/chkstatus?callback=dr1002&v=12345"));
+
+    // logout：443 + /drcom/logout + dr1006 回调
+    const auto out = PortalProtocol::buildLogoutUrl(QStringLiteral("s.scut.edu.cn"), 7);
+    QCOMPARE(out.toString(QUrl::FullyEncoded),
+             QStringLiteral("https://s.scut.edu.cn/drcom/logout?callback=dr1006&jsVersion=3.3.2&v=7&lang=zh"));
+
+    // login：801 端口 + /eportal/，user_account 带 ",0," 前缀并整体 URL 编码，
+    // 密码中的 URL 保留字符（& = @）必须被编码（与浏览器 encodeURIComponent 行为一致）
+    const auto url = PortalProtocol::buildLoginUrl(QStringLiteral("s.scut.edu.cn"),
+                                                   QStringLiteral("2026xxxx"),
+                                                   QStringLiteral("p@ss&word=1"),
+                                                   QStringLiteral("172.18.1.2"), 99);
+    QCOMPARE(url.host(), QStringLiteral("s.scut.edu.cn"));
+    QCOMPARE(url.port(), 801);
+    QCOMPARE(url.path(), QStringLiteral("/eportal/"));
+    const QString q = url.query(QUrl::FullyEncoded);
+    QVERIFY(q.contains(QStringLiteral("c=Portal&a=login&callback=dr1003&login_method=1")));
+    QVERIFY(q.contains(QStringLiteral("user_account=%2C0%2C2026xxxx")));
+    QVERIFY(q.contains(QStringLiteral("user_password=p%40ss%26word%3D1")));
+    QVERIFY(q.contains(QStringLiteral("wlan_user_ip=172.18.1.2")));
+    QVERIFY(q.contains(QStringLiteral("wlan_user_ipv6=&wlan_user_mac=000000000000")));
+    QVERIFY(q.contains(QStringLiteral("wlan_ac_ip=&wlan_ac_name=&jsVersion=3.3.2&v=99")));
+
+    // 中文密码（UTF-8 编码后百分号转义）
+    const auto url2 = PortalProtocol::buildLoginUrl(QStringLiteral("s.scut.edu.cn"),
+                                                    QStringLiteral("u"), QStringLiteral("密码"),
+                                                    QStringLiteral("10.0.0.1"), 1);
+    QVERIFY(url2.query(QUrl::FullyEncoded)
+                .contains(QStringLiteral("user_password=%E5%AF%86%E7%A0%81")));
+}
+
+void TestPackets::portal_parseJsonp()
+{
+    // 登录成功响应（dr1003）
+    auto r = PortalProtocol::parseJsonp(
+        QByteArrayLiteral("dr1003({\"result\":1,\"msg\":\"Portal协议认证成功\"})"),
+        QStringLiteral("dr1003"));
+    QVERIFY(r.valid);
+    QCOMPARE(r.result, 1);
+    QCOMPARE(r.msg, QStringLiteral("Portal协议认证成功"));
+
+    // 登录失败响应（result=0 + 原因）
+    r = PortalProtocol::parseJsonp(
+        QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"密码错误\"})"),
+        QStringLiteral("dr1003"));
+    QVERIFY(r.valid);
+    QCOMPARE(r.result, 0);
+    QCOMPARE(r.msg, QStringLiteral("密码错误"));
+
+    // chkstatus 已在线（dr1002 + v46ip；尾随分号容忍）
+    r = PortalProtocol::parseJsonp(
+        QByteArrayLiteral("dr1002({\"result\":1,\"v46ip\":\"172.18.2.3\"});"),
+        QStringLiteral("dr1002"));
+    QVERIFY(r.valid);
+    QCOMPARE(r.result, 1);
+    QCOMPARE(r.v46ip, QStringLiteral("172.18.2.3"));
+
+    // result 为字符串形态的部署兼容
+    r = PortalProtocol::parseJsonp(
+        QByteArrayLiteral("dr1003({\"result\":\"1\",\"msg\":\"ok\"})"),
+        QStringLiteral("dr1003"));
+    QVERIFY(r.valid);
+    QCOMPARE(r.result, 1);
+
+    // 畸形输入：回调名不匹配 / 非 JSON / 空体
+    QVERIFY(!PortalProtocol::parseJsonp(QByteArrayLiteral("dr1003({\"result\":1})"),
+                                        QStringLiteral("dr1002")).valid);
+    QVERIFY(!PortalProtocol::parseJsonp(QByteArrayLiteral("dr1003(not json)"),
+                                        QStringLiteral("dr1003")).valid);
+    QVERIFY(!PortalProtocol::parseJsonp(QByteArrayLiteral(""),
+                                        QStringLiteral("dr1003")).valid);
+}
+
+void TestPackets::portal_responseClassification()
+{
+    // "已在线"类提示 → 视为登录成功（掉线重登竞态的兜底）
+    QVERIFY(PortalProtocol::isAlreadyOnline(QStringLiteral("该账号已经在线")));
+    QVERIFY(PortalProtocol::isAlreadyOnline(QStringLiteral("IP 已在线")));
+    QVERIFY(!PortalProtocol::isAlreadyOnline(QStringLiteral("密码错误")));
+    // 设备数超限冲突（本机未认证）→ 不视为已在线，走失败/重试路径
+    QVERIFY(!PortalProtocol::isAlreadyOnline(QStringLiteral("该账号已在其他设备在线")));
+
+    // 凭证/账户状态类 → 永久性错误（停止自动重试）
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("密码错误")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("账号不存在")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("该账号已过期")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("流量已用尽")));
+    QVERIFY(PortalProtocol::isPermanentFailure(QStringLiteral("上网时长已用尽")));
+
+    // 暂时性错误 → 保留自动重试
+    QVERIFY(!PortalProtocol::isPermanentFailure(QStringLiteral("IP地址不匹配")));
+    QVERIFY(!PortalProtocol::isPermanentFailure(QStringLiteral("认证失败")));
+    QVERIFY(!PortalProtocol::isPermanentFailure(QStringLiteral("Some transient error")));
 }
 
 // ============================================================================
@@ -821,6 +955,7 @@ void TestPackets::configManager_roundtrip()
     cfg.manualIp      = QStringLiteral("192.168.1.100");
     cfg.manualMask    = QStringLiteral("255.255.255.0");
     cfg.manualGateway = QStringLiteral("192.168.1.1");
+    cfg.wireless      = true;
     cfg.savePassword  = true;
     cfg.autoSetNetwork = true;
     cfg.autoStart      = true;
@@ -839,10 +974,17 @@ void TestPackets::configManager_roundtrip()
     QCOMPARE(loaded.manualIp, cfg.manualIp);
     QCOMPARE(loaded.manualMask, cfg.manualMask);
     QCOMPARE(loaded.manualGateway, cfg.manualGateway);
+    QVERIFY(loaded.wireless);                  // authMode=wireless 回环
     QVERIFY(loaded.savePassword);
     QVERIFY(loaded.autoSetNetwork);
     QVERIFY(loaded.autoStart);
     QVERIFY(loaded.autoConnect);
+
+    // 无 authMode 键的旧配置 → 默认有线（向后兼容）
+    QSettings legacy(path, QSettings::IniFormat);
+    legacy.remove(QStringLiteral("authMode"));
+    legacy.sync();
+    QVERIFY(!ConfigManager::load(path).wireless);
 
     // 清理工作目录（失败时忽略，不影响断言结果）
     QDir(workDir).removeRecursively();

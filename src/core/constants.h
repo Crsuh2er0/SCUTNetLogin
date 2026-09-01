@@ -185,6 +185,26 @@ constexpr std::array<uint8_t, 4> DEFAULT_SERVER_IP = { 202, 38, 193, 33 };
 constexpr const char* DEFAULT_DNS = "202.38.193.33";
 
 // ============================================================================
+// 六·二、无线 Portal（DrCOM eportal）认证常量 — s.scut.edu.cn
+// ============================================================================
+
+// eportal 认证 API 端口（chkstatus/logout 走标准 443，login 走 801）
+constexpr uint16_t PORTAL_LOGIN_PORT = 801;
+// HTTP 请求超时 (ms)
+constexpr int PORTAL_REQUEST_TIMEOUT = 8000;
+// 在线状态检测周期 (ms) — SCUT Portal 策略为 15 分钟无流量下线，周期检测 + 自动
+// 重登可保持长期在线；周期内正常请求不产生任何日志
+constexpr int PORTAL_KEEPALIVE_INTERVAL = 60 * 1000;
+// eportal JS 版本（SCUT 部署为 3.x）
+constexpr const char* PORTAL_JS_VERSION = "3.3.2";
+// 伪装浏览器 UA（eportal 服务端会校验 User-Agent）
+constexpr const char* PORTAL_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+// wlan_user_mac 固定值（服务端不校验）
+constexpr const char* PORTAL_WLAN_USER_MAC = "000000000000";
+
+// ============================================================================
 // 七、UI / 应用常量
 // ============================================================================
 

@@ -38,6 +38,8 @@ SOURCES += \
     src/network/network.cpp \
     src/udp/drcom_packet.cpp \
     src/eap/eapol_packet.cpp \
+    src/portal/portal_protocol.cpp \
+    src/portal/portal_process.cpp \
     src/log/log_manager.cpp
 
 HEADERS += \
@@ -57,6 +59,8 @@ HEADERS += \
     src/core/constants.h \
     src/udp/drcom_packet.h \
     src/eap/eapol_packet.h \
+    src/portal/portal_protocol.h \
+    src/portal/portal_process.h \
     src/log/log_manager.h
 
 FORMS += src/ui/mainwindow.ui

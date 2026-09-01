@@ -142,12 +142,17 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(ui->editPassword, &QLineEdit::returnPressed, this, &MainWindow::on_btnConnect_clicked);
 
+    // 认证方式切换：无线模式禁用有线专属控件（网卡/静态IP）
+    connect(ui->comboAuthMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::applyAuthModeUI);
+
     ui->comboInterface->installEventFilter(this);
     ui->comboInterface->setMinimumContentsLength(10);
 
     initSessionManager();
     loadInterfaces();
     loadConfig();
+    applyAuthModeUI();   // 显式同步一次（配置为有线默认值时不触发 currentIndexChanged）
     autoDetectNetworkConfig();
     initSystemTray(appIcon);
 
@@ -397,10 +402,32 @@ QString MainWindow::autoDetectMacForUI()
 // 配置持久化
 // ============================================================================
 
+bool MainWindow::isWirelessMode() const
+{
+    return ui->comboAuthMode->currentIndex() == 1;
+}
+
+void MainWindow::applyAuthModeUI()
+{
+    // 无线 Portal 走 HTTP 认证（系统路由直达门户），网卡选择 / MAC / 静态IP /
+    // DNS 均为有线专属配置，无线模式下禁用避免误导
+    const bool wired = !isWirelessMode();
+    ui->comboInterface->setEnabled(wired);
+    ui->btnRefresh->setEnabled(wired);
+    ui->editMac->setEnabled(wired);
+    ui->editIp->setEnabled(wired);
+    ui->editMask->setEnabled(wired);
+    ui->editGateway->setEnabled(wired);
+    ui->editDNSServer->setEnabled(wired);
+    ui->editBackupDNS->setEnabled(wired);
+    ui->checkAutoSetNetwork->setEnabled(wired);
+}
+
 void MainWindow::loadConfig()
 {
     AppConfig cfg = ConfigManager::load(ConfigManager::defaultPath());
 
+    ui->comboAuthMode->setCurrentIndex(cfg.wireless ? 1 : 0);
     ui->editUsername->setText(cfg.username);
     if (cfg.savePassword) {
         ui->editPassword->setText(cfg.password);
@@ -447,6 +474,7 @@ AppConfig MainWindow::collectCurrentCfg()
     cfg.manualIp      = ui->editIp->text();
     cfg.manualMask    = ui->editMask->text();
     cfg.manualGateway = ui->editGateway->text();
+    cfg.wireless      = isWirelessMode();
     cfg.savePassword  = ui->checkSavePassword->isChecked();
     cfg.autoSetNetwork = ui->checkAutoSetNetwork->isChecked();
     cfg.autoStart      = ui->checkAutoStart->isChecked();
@@ -484,7 +512,11 @@ void MainWindow::on_btnConnect_clicked()
 {
     if (m_sessionManager->state() != AppConnectionState::Disconnected)
         return;
-    if (ui->comboInterface->count() == 0) {
+
+    const bool wireless = isWirelessMode();
+
+    // 无线 Portal 不依赖 Npcap 网卡；仅有线模式要求网卡可用
+    if (!wireless && ui->comboInterface->count() == 0) {
         onLogMessage(QStringLiteral("未检测到可用网卡，请点击刷新重试"), 2);
         return;
     }
@@ -495,8 +527,9 @@ void MainWindow::on_btnConnect_clicked()
     in.displayText    = ui->comboInterface->currentText();
     in.username       = ui->editUsername->text();
     in.password       = ui->editPassword->text();
-    in.mac            = autoDetectMacForUI();
-    in.autoSetNetwork = ui->checkAutoSetNetwork->isChecked();
+    in.wireless       = wireless;
+    in.autoSetNetwork = !wireless && ui->checkAutoSetNetwork->isChecked();
+    in.mac            = wireless ? QString() : autoDetectMacForUI();
     if (in.autoSetNetwork)
         in.adapterName = Network::adapterNameByMac(in.mac);
     in.ip      = ui->editIp->text().trimmed();
@@ -545,8 +578,9 @@ void MainWindow::autoConnectWithRetry(int attempt)
 
     // 登录早期最常见的网络未就绪信号：Npcap 尚未把网卡枚举出来（count==0），
     // 或走静态IP配置时网卡还没拿到 MAC 地址。这两类是暂时性的，值得重试。
-    bool networkNotReady = ui->comboInterface->count() == 0;
-    if (!networkNotReady && ui->checkAutoSetNetwork->isChecked())
+    // 无线 Portal 不依赖 Npcap 网卡，不做就绪检测直接发起认证。
+    bool networkNotReady = !isWirelessMode() && ui->comboInterface->count() == 0;
+    if (!networkNotReady && !isWirelessMode() && ui->checkAutoSetNetwork->isChecked())
         networkNotReady = autoDetectMacForUI().isEmpty();
 
     if (networkNotReady) {
@@ -601,12 +635,15 @@ void MainWindow::applyStateUI(AppConnectionState state)
     static const StateInfo kSettingNetwork = {
         QStringLiteral("正在配置网络..."), QStringLiteral("正在设置静态IP及DNS"),
         QStringLiteral(" (配置网络中...)"), QStringLiteral("connecting"), true };
-    static const StateInfo kAuthenticating = {
-        QStringLiteral("正在认证..."), QStringLiteral("正在发送802.1X认证包"),
-        QStringLiteral(" (认证中...)"), QStringLiteral("connecting"), true };
     static const StateInfo kConnected = {
         QStringLiteral("已连接"), QStringLiteral("校园网已连接，可以上网"),
         QStringLiteral(" (已连接)"), QStringLiteral("connected"), true };
+    // 认证中文案按认证方式区分（有线 802.1X / 无线 Portal）
+    const StateInfo kAuthenticating = {
+        QStringLiteral("正在认证..."),
+        isWirelessMode() ? QStringLiteral("正在进行 Portal 网页认证")
+                         : QStringLiteral("正在发送802.1X认证包"),
+        QStringLiteral(" (认证中...)"), QStringLiteral("connecting"), true };
 
     const StateInfo* info = nullptr;
     switch (state) {
@@ -716,6 +753,7 @@ AuthConfig MainWindow::getCurrentConfig()
     appCfg.interfaceName = ui->comboInterface->currentData().toString();
     appCfg.manualMac     = ui->editMac->text();
     appCfg.manualIp      = ui->editIp->text();
+    appCfg.wireless      = isWirelessMode();
 
     AuthConfig config = ConfigManager::toAuthConfig(appCfg);
     ConfigManager::resolveAuthConfig(config);

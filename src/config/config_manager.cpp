@@ -33,6 +33,8 @@ AppConfig load(const QString& configPath)
     cfg.manualIp      = settings.value("manualIp", "").toString();
     cfg.manualMask    = settings.value("manualMask", "255.255.255.0").toString();
     cfg.manualGateway = settings.value("manualGateway", "").toString();
+    // 认证方式：authMode=wired/wireless；旧配置无此键 → 有线（向后兼容）
+    cfg.wireless = settings.value("authMode", "wired").toString() == "wireless";
     cfg.autoSetNetwork = settings.value("autoSetNetwork", false).toBool();
     cfg.autoStart      = settings.value("autoStart", false).toBool();
     cfg.autoConnect    = settings.value("autoConnect", false).toBool();
@@ -83,6 +85,7 @@ AuthConfig toAuthConfig(const AppConfig& cfg)
     config.host          = cfg.host;
     config.dnsServer     = cfg.dns;
     config.interfaceName = cfg.interfaceName;
+    config.mode          = cfg.wireless ? AuthMode::Wireless : AuthMode::Wired;
 
     // MAC
     QString macStr = ByteUtils::normalizeMac(cfg.manualMac);

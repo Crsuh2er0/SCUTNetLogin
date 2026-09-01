@@ -147,23 +147,40 @@
              <property name="fieldGrowthPolicy"><enum>QFormLayout::AllNonFixedFieldsGrow</enum></property>
              <property name="labelAlignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property>
              <item row="0" column="0">
+              <widget class="QLabel" name="label_authmode">
+               <property name="text"><string>认证方式</string></property>
+               <property name="formLabel" stdset="0"><bool>true</bool></property>
+              </widget>
+             </item>
+             <item row="0" column="1">
+              <widget class="QComboBox" name="comboAuthMode">
+               <property name="toolTip"><string>有线：802.1X 认证（宿舍网口）；无线：Portal 网页认证（scut-student 等 SSID）</string></property>
+               <item>
+                <property name="text"><string>有线 802.1X</string></property>
+               </item>
+               <item>
+                <property name="text"><string>无线 Portal</string></property>
+               </item>
+              </widget>
+             </item>
+             <item row="1" column="0">
               <widget class="QLabel" name="label_user">
                <property name="text"><string>账号</string></property>
                <property name="formLabel" stdset="0"><bool>true</bool></property>
               </widget>
              </item>
-             <item row="0" column="1">
+             <item row="1" column="1">
               <widget class="QLineEdit" name="editUsername">
                <property name="placeholderText"><string>校园网账号</string></property>
               </widget>
              </item>
-             <item row="1" column="0">
+             <item row="2" column="0">
               <widget class="QLabel" name="label_pwd">
                <property name="text"><string>密码</string></property>
                <property name="formLabel" stdset="0"><bool>true</bool></property>
               </widget>
              </item>
-             <item row="1" column="1">
+             <item row="2" column="1">
               <layout class="QHBoxLayout" name="pwdLayout">
                <property name="spacing"><number>12</number></property>
                <item>

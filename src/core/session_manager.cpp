@@ -32,11 +32,14 @@ SessionManager::~SessionManager()
 
     QMetaObject::invokeMethod(m_eapProcess, "stop", Qt::QueuedConnection);
     QMetaObject::invokeMethod(m_udpProcess, "stop", Qt::QueuedConnection);
+    QMetaObject::invokeMethod(m_portalProcess, "stop", Qt::QueuedConnection);
 
     m_eapThread.quit();
     m_eapThread.wait();
     m_udpThread.quit();
     m_udpThread.wait();
+    m_portalThread.quit();
+    m_portalThread.wait();
     m_networkThread.quit();
     m_networkThread.wait();
 
@@ -49,6 +52,10 @@ SessionManager::~SessionManager()
     if (!m_udpThread.isRunning() && !m_udpThread.isFinished() && m_udpProcess) {
         delete m_udpProcess;
         m_udpProcess = nullptr;
+    }
+    if (!m_portalThread.isRunning() && !m_portalThread.isFinished() && m_portalProcess) {
+        delete m_portalProcess;
+        m_portalProcess = nullptr;
     }
 }
 
@@ -95,6 +102,16 @@ void SessionManager::initProcesses()
     connect(m_networkWorker, &NetworkWorker::autoStartDone,  this, &SessionManager::onAutoStartDone);
     m_networkThread.start();
 
+    // -- 无线 Portal 认证线程（惰性启动，同 EAP/UDP） --
+    // 失败/停止处理复用 onEapStateChanged（两套认证的状态机语义一致：
+    // Failed 含 retryable 区分、Stopped 表示用户主动断开）
+    m_portalProcess = new PortalProcess();
+    m_portalProcess->moveToThread(&m_portalThread);
+    connect(&m_portalThread, &QThread::finished, m_portalProcess, &QObject::deleteLater);
+    connect(m_portalProcess, &PortalProcess::stateChanged, this, &SessionManager::onEapStateChanged);
+    connect(m_portalProcess, &PortalProcess::logMessage,   this, &SessionManager::logMessage);
+    connect(m_portalProcess, &PortalProcess::portalSuccess, this, &SessionManager::onPortalSuccess);
+
     // -- 日志文件持久化 --
     m_logManager = new LogManager(this);
     connect(this, &SessionManager::logMessage, m_logManager, &LogManager::onLogMessage);
@@ -112,6 +129,12 @@ void SessionManager::startConnection(const AuthConfig& config, const StaticIpCon
     m_config = config;
     m_ipCfg  = ipCfg;
     m_wasStaticIpSet = false;
+
+    // 无线 Portal：不依赖网卡/静态IP（系统路由直接可达门户），直接进入认证
+    if (config.mode == AuthMode::Wireless) {
+        startPortal();
+        return;
+    }
 
     if (!ipCfg.adapterName.isEmpty()) {
         setState(AppConnectionState::SettingNetwork);
@@ -161,6 +184,20 @@ void SessionManager::startAuth(bool restartEap)
     QMetaObject::invokeMethod(m_eapProcess, restartEap ? "restart" : "start", Qt::QueuedConnection);
 }
 
+void SessionManager::startPortal()
+{
+    // 惰性启动 Portal 线程（首次无线认证时拉起，此后保持运行直至进程退出）
+    if (!m_portalThread.isRunning())
+        m_portalThread.start();
+
+    setState(AppConnectionState::Authenticating);
+    emit logMessage(QStringLiteral("开始无线 Portal 认证（%1）...").arg(m_config.host), 0);
+
+    // 与 startAuth 相同的顺序契约：setConfig 同步直调先于排队的 start 事件
+    m_portalProcess->setConfig(m_config);
+    QMetaObject::invokeMethod(m_portalProcess, "start", Qt::QueuedConnection);
+}
+
 void SessionManager::stopConnection()
 {
     if (m_reconnectTimer)
@@ -171,6 +208,9 @@ void SessionManager::stopConnection()
 
     QMetaObject::invokeMethod(m_eapProcess, "stop", Qt::QueuedConnection);
     QMetaObject::invokeMethod(m_udpProcess, "stop", Qt::QueuedConnection);
+    // 无线模式下 Portal stop 会尽力注销会话（logout）；有线模式下该调用
+    // 因从未 start 而无副作用（代数守卫 + wasOnline=false 不发请求）
+    QMetaObject::invokeMethod(m_portalProcess, "stop", Qt::QueuedConnection);
 
     restoreDhcp();
     setState(AppConnectionState::Disconnected);
@@ -248,6 +288,21 @@ void SessionManager::onEapSuccess(const QByteArray& md5Data)
     setState(AppConnectionState::Connected);
     m_udpProcess->setMd5Data(md5Data);
     QMetaObject::invokeMethod(m_udpProcess, "start", Qt::QueuedConnection);
+}
+
+void SessionManager::onPortalSuccess()
+{
+    // 无线 Portal 无 UDP 心跳：会话由服务器维护，PortalProcess 周期
+    // chkstatus 检测掉线并自动重登（掉线重登成功也走本槽）
+    if (m_reconnectTimer && m_reconnectTimer->isActive()) {
+        m_reconnectTimer->stop();
+        emit logMessage(QStringLiteral("自动重连成功！"), 0);
+    } else if (m_state == AppConnectionState::Connected) {
+        emit logMessage(QStringLiteral("掉线后自动重新登录成功"), 0);
+    } else {
+        emit logMessage(QStringLiteral("Portal 认证成功，可以上网了！"), 0);
+    }
+    setState(AppConnectionState::Connected);
 }
 
 void SessionManager::onUdpOnline()
@@ -353,6 +408,12 @@ void SessionManager::onReconnectTimeout()
     }
 
     emit logMessage(QStringLiteral("尝试重新连接..."), 0);
+
+    // 无线模式：Portal start() 自身幂等（代数递增作废旧会话），直接重启
+    if (m_config.mode == AuthMode::Wireless) {
+        startPortal();
+        return;
+    }
 
     // 跳过静态IP设置阶段（IP 已在上次连接时配置好），直接开始认证。
     // EAP 用原子的 restart()（复位设备 + 重启，不发射 Stopped），不再依赖

@@ -6,6 +6,7 @@
 #include "core/protocol.h"
 #include "eap/eap_process.h"
 #include "udp/udp_process.h"
+#include "portal/portal_process.h"
 #include "network/network_worker.h"
 
 class LogManager;
@@ -49,6 +50,7 @@ signals:
 private slots:
     void onEapStateChanged(AuthState state, const QString& message, bool retryable = true);
     void onEapSuccess(const QByteArray& md5Data);
+    void onPortalSuccess();                    // 无线 Portal 认证成功（含保活掉线重登）
     void onUdpOnline();
     void onStaticIpDone();
     void onStaticIpFailed(const QString& error);
@@ -61,6 +63,7 @@ private:
     void startAuth(bool restartEap = false);   // EAP 认证阶段（静态IP完成后调用）
                                                // restartEap=true: 重连路径用原子的
                                                // EapProcess::restart() 替代 stop+start
+    void startPortal();                        // 无线 Portal 认证阶段（无线不走静态IP）
     void restoreDhcp();
     void setState(AppConnectionState state);
 
@@ -75,9 +78,11 @@ private:
     // --- 线程 & 工作对象 ---
     QThread        m_eapThread;
     QThread        m_udpThread;
+    QThread        m_portalThread;    // 无线 Portal 认证（惰性启动，同 EAP/UDP）
     QThread        m_networkThread;
     EapProcess*    m_eapProcess    = nullptr;
     UdpProcess*    m_udpProcess    = nullptr;
+    PortalProcess* m_portalProcess = nullptr;
     NetworkWorker* m_networkWorker = nullptr;
 
     // --- 状态 ---

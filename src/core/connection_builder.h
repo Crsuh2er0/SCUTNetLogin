@@ -28,6 +28,7 @@ struct Input {
     QString username;            // 认证用户名（须非空）
     QString password;            // 认证密码（须非空）
     QString mac;                 // 网卡 MAC（已自动探测，可能为空）
+    bool    wireless = false;    // 无线 Portal 模式：跳过网卡/静态IP校验（不依赖 Npcap）
     bool    autoSetNetwork = false;   // 是否启用静态 IP 配置
     QString adapterName;         // netsh 适配器名（调用方预解析，可为空）
     QString ip;

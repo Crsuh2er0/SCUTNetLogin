@@ -16,6 +16,7 @@ struct AppConfig {
     QString manualIp;
     QString manualMask      = "255.255.255.0";
     QString manualGateway;
+    bool    wireless        = false;  // 认证方式：true=无线 Portal / false=有线 802.1X
     bool    savePassword    = false;
     bool    autoSetNetwork  = false;
     bool    autoStart       = false;
@@ -35,6 +36,7 @@ inline bool operator==(const AppConfig& a, const AppConfig& b)
         && a.manualIp      == b.manualIp
         && a.manualMask    == b.manualMask
         && a.manualGateway == b.manualGateway
+        && a.wireless      == b.wireless
         && a.savePassword   == b.savePassword
         && a.autoSetNetwork == b.autoSetNetwork
         && a.autoStart      == b.autoStart

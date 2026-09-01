@@ -149,7 +149,14 @@ struct DrcomMiscHeartbeatResponseFlux {
 // 三、认证配置 & 状态枚举
 // ============================================================================
 
-// 认证状态枚举（EAP 认证流程状态机）
+// 认证方式：有线走 802.1X EAP-MD5 + DrCOM UDP 心跳；无线走 Portal（eportal）HTTP 认证
+enum class AuthMode {
+    Wired,      // 有线 802.1X（默认，保持历史配置向后兼容）
+    Wireless    // 无线 Portal（s.scut.edu.cn）
+};
+
+// 认证状态枚举（EAP 认证流程状态机；Portal 复用同一枚举：SendingStart=状态
+// 查询、SendingIdentity=登录中、Authenticated=在线）
 enum class AuthState {
     Idle,                       // 空闲
     SendingStart,               // 已发 EAPOL-Start，等待 Request/Identity
@@ -173,7 +180,7 @@ struct StaticIpConfig {
     QString mac;           // DHCP 恢复用的 MAC 字符串
 };
 
-// 认证配置（跨 EapProcess / UdpProcess 共享）
+// 认证配置（跨 EapProcess / UdpProcess / PortalProcess 共享）
 struct AuthConfig {
     QString  interfaceName;     // pcap 设备名 (如 \Device\NPF_{GUID})
     QString  username;
@@ -181,6 +188,7 @@ struct AuthConfig {
     QString  host;              // 认证服务器主机名 (如 s.scut.edu.cn)
     QString  dnsServer;         // 主 DNS 地址
     QString  hostname;          // 本机主机名
+    AuthMode mode = AuthMode::Wired;   // 认证方式（有线 802.1X / 无线 Portal）
     uint8_t  localMac[6] = {};
     uint8_t  localIp[4]  = {};
 };

@@ -51,6 +51,11 @@ private:
     AppConfig collectCurrentCfg();
     void setAutoStartRegistry(bool enable);
 
+    // 当前认证方式（comboAuthMode 索引 0=有线 802.1X / 1=无线 Portal）
+    bool isWirelessMode() const;
+    // 认证方式切换：无线模式下禁用有线专属控件（网卡/静态IP 等）
+    void applyAuthModeUI();
+
     // 自动连接：登录早期网卡可能未就绪，未就绪时按间隔重试
     void autoConnectWithRetry(int attempt = 0);
 
