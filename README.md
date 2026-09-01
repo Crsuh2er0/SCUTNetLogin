@@ -161,8 +161,7 @@ qmake tst_packets.pro && nmake release
 .\release\tst_packets.exe
 ```
 
-或直接运行 `tests\build_test.bat`（含环境准备）。CI（GitHub Actions）在每次推送/PR 时
-自动构建并运行同一套测试。
+CI（GitHub Actions）在每次推送/PR 时自动构建并运行同一套测试。
 
 ---
 
