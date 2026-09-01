@@ -7,9 +7,11 @@ TEMPLATE = app
 
 INCLUDEPATH += src
 
-# Npcap
-INCLUDEPATH += "C:/npcap-sdk/Include"
-LIBS += -L"C:/npcap-sdk/Lib/x64" -lwpcap -lPacket -lws2_32 -liphlpapi
+# Npcap SDK 路径：默认 C:/npcap-sdk，可用环境变量 NPCAP_SDK 覆盖（如装 D 盘）
+NPCAP_SDK = $$(NPCAP_SDK)
+isEmpty(NPCAP_SDK): NPCAP_SDK = C:/npcap-sdk
+INCLUDEPATH += "$$NPCAP_SDK/Include"
+LIBS += -L"$$NPCAP_SDK/Lib/x64" -lwpcap -lPacket -lws2_32 -liphlpapi
 # DPAPI（密码加密，CryptProtectData/CryptUnprotectData）
 LIBS += -lcrypt32
 # 管理员权限检查（main.cpp: OpenProcessToken / GetTokenInformation）
