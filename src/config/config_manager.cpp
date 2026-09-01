@@ -67,6 +67,7 @@ void save(const QString& configPath, const AppConfig& cfg)
     settings.setValue("manualMask",    cfg.manualMask);
     settings.setValue("manualGateway", cfg.manualGateway);
     settings.setValue("backupDns",     cfg.backupDns);
+    settings.setValue("authMode",      cfg.wireless ? "wireless" : "wired");
     settings.setValue("autoSetNetwork", cfg.autoSetNetwork);
     settings.setValue("autoStart",      cfg.autoStart);
     settings.setValue("autoConnect",    cfg.autoConnect);
