@@ -80,10 +80,6 @@ private:
 
     bool m_isQuitting = false;
 
-    // 上次保存的自启动状态，用于检测勾选是否真的变化；
-    // 只有改变时才同步系统任务计划，避免连接/保存配置时反复调用 schtasks。
-    bool m_lastAutoStart = false;
-
     // 上次保存到 config.ini 的 UI 配置快照："保存配置"按钮的脏检测基准
     AppConfig m_lastSavedConfig;
 

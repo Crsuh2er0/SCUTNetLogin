@@ -174,8 +174,8 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     // "开机自启动"不再即时保存/同步：勾选只改界面状态，与其它配置一起在
-    // "保存配置"（或点击"连接"时）统一落盘并同步任务计划（见 saveConfig 内
-    // m_lastAutoStart 比较）。原"勾选即保存"路径已移除。
+    // "保存配置"（或点击"连接"时）统一落盘并同步任务计划（见 saveConfig：每次保存都交给
+    // NetworkWorker 核对系统任务的实际目标，仅在失配时才重建/删除）。原"勾选即保存"路径已移除。
     // 因此 loadConfig 里恢复勾选也不会触发任何写盘，无需顺序规避。
 
     if (ui->checkAutoConnect->isChecked()) {
@@ -419,10 +419,6 @@ void MainWindow::loadConfig()
     ui->checkAutoStart->setChecked(cfg.autoStart);
     ui->checkAutoConnect->setChecked(cfg.autoConnect);
 
-    // 记录加载时的自启动状态，作为后续"是否变化"的比较基准。
-    // 启动时恢复勾选状态不应重新同步系统任务（避免误删/误建）。
-    m_lastAutoStart = cfg.autoStart;
-
     for (int i = 0; i < ui->comboInterface->count(); i++) {
         if (ui->comboInterface->itemData(i).toString() == cfg.interfaceName) {
             ui->comboInterface->setCurrentIndex(i);
@@ -461,14 +457,12 @@ void MainWindow::saveConfig()
     ConfigManager::save(ConfigManager::defaultPath(), cfg);
     m_lastSavedConfig = cfg;   // 更新脏检测基准
 
-    // 开机自启动只在勾选状态真正改变时才同步系统任务计划。
-    // 严禁在 saveConfig 每次都调用 —— saveConfig 被"连接""保存配置"等入口反复触发，
-    // 若每次都调 schtasks，会频繁增删任务并制造"系统找不到指定的文件"报错。
-    const bool wantAutoStart = ui->checkAutoStart->isChecked();
-    if (wantAutoStart != m_lastAutoStart) {
-        m_lastAutoStart = wantAutoStart;
-        setAutoStartRegistry(wantAutoStart);
-    }
+    // 开机自启动：每次保存都把「期望状态」交给 NetworkWorker，由它核对系统里任务「实际指向
+    // 的目标」是否为当前运行 exe，只有真正失配（任务不存在 / 指向别的 exe / 缺 --silent）时
+    // 才 /create 或 /delete。原实现用「勾选状态是否变化」做守卫，一旦 config 已是 autoStart=true
+    // 但任务仍指向旧 exe（如从开发版换装到 Program Files），勾选没变就永不重建，自启永远失效。
+    // 如今核对发生在任务侧，保存/连接时依旧不会频繁增删任务（worker 查询后直接 no-op）。
+    setAutoStartRegistry(ui->checkAutoStart->isChecked());
 }
 
 void MainWindow::setAutoStartRegistry(bool enable)
