@@ -14,6 +14,7 @@ public:
 signals:
     void staticIpDone();
     void staticIpFailed(const QString& error);
+    void autoStartDone(bool ok, const QString& error);
 
 public slots:
     void doSetStaticIp(const QString& adapter, const QString& ip, const QString& mask,

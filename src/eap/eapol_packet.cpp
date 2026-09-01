@@ -71,7 +71,14 @@ QByteArray calculateMD5(uint8_t identifier, const QString& password,
     QByteArray pwdUtf8 = password.toUtf8();
     data.append(pwdUtf8);
     data.append(challenge);
-    return QCryptographicHash::hash(data, QCryptographicHash::Md5);
+    const QByteArray digest = QCryptographicHash::hash(data, QCryptographicHash::Md5);
+
+    // 及时清除内存中的明文密码副本（QString 本身不可安全清零，
+    // 至少保证本地临时缓冲不残留密码原文；认证结果 digest 不含明文）
+    pwdUtf8.fill('\0');
+    data.fill('\0');
+
+    return digest;
 }
 
 // ============================================================================
@@ -101,6 +108,51 @@ QByteArray buildMd5ChallengePayload(const QByteArray& md5Result,
                    DRCOM_MD5_RESPONSE_SUFFIX.size());
     payload.append(reinterpret_cast<const char*>(clientIp), 4);
     return payload;
+}
+
+// ============================================================================
+// EAP 帧解析（从 EapProcess::parsePacket 提取的纯函数，可独立单测）
+// ============================================================================
+
+bool parseEapPacket(const QByteArray& data, EAPHeader* outEapHeader, QByteArray* outPayload)
+{
+    if (data.size() < EAPOL_MIN_FRAME_SIZE)
+        return false;
+
+    const EthHeader* eth = reinterpret_cast<const EthHeader*>(data.data());
+    if (eth->eth_type != htons(ETHERTYPE_EAPOL))
+        return false;
+
+    const EAPOLHeader* eapol = reinterpret_cast<const EAPOLHeader*>(data.data() + ETH_HEADER_SIZE);
+    if (eapol->version != EAPOL_VERSION || eapol->packet_type != EAPOL_TYPE_EAP_PACKET)
+        return false;
+
+    // EAP 头部 = code(1) + id(1) + length(2) [+ type(1)，仅 Request/Response]。
+    // 基础 4 字节只需帧长 ≥ 22；type 字节（第 5 字节）仅在帧足够长时才读取，
+    // 避免对恰好 22 字节的 Success/Failure 帧越界读取（EAP_HEADER_OFFSET+sizeof > 帧长）。
+    if (data.size() < EAP_HEADER_OFFSET + 4)
+        return false;
+
+    EAPHeader hdr = {};
+    memcpy(&hdr, data.data() + EAP_HEADER_OFFSET, 4);
+    const bool hasType = (hdr.code == EAP_CODE_REQUEST || hdr.code == EAP_CODE_RESPONSE);
+    if (hasType) {
+        if (data.size() < EAP_HEADER_OFFSET + 5)
+            return false;
+        hdr.type = static_cast<uint8_t>(data.at(EAP_HEADER_OFFSET + 4));
+    }
+    *outEapHeader = hdr;
+
+    // payload 长度：Request/Response 含 type 字节（len-5）；Success/Failure 无
+    // type 字节（len-4）。旧实现对 Success/Failure 也按 len-5 计算，长 1 字节的
+    // 奇异帧会少算 payload——此处按 EAP 头部结构精确计算。
+    const int payloadOffset = EAP_HEADER_OFFSET + 4 + (hasType ? 1 : 0);
+    const int payloadSize   = ntohs(hdr.length) - (hasType ? 5 : 4);
+
+    if (payloadSize > 0 && data.size() >= payloadOffset + payloadSize)
+        *outPayload = data.mid(payloadOffset, payloadSize);
+
+    return true;
 }
 
 } // namespace EapolPacket

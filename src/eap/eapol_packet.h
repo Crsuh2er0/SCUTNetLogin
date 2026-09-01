@@ -41,6 +41,11 @@ QByteArray buildMd5ChallengePayload(const QByteArray& md5Result,
                                       const QByteArray& username,
                                       const uint8_t* clientIp);
 
+// 解析 Eth/EAPOL/EAP 帧头（纯函数，无 I/O）。返回 false 表示非合法 EAPOL
+// EAP-Packet 帧（长度不足 / 以太网类型不符 / 版本或包类型不符 / Request 缺 type）。
+// 输出：outEapHeader 成功时填充；outPayload 存在 EAP payload 时填充，否则为空。
+bool parseEapPacket(const QByteArray& data, EAPHeader* outEapHeader, QByteArray* outPayload);
+
 } // namespace EapolPacket
 
 #endif // EAPOL_PACKET_H

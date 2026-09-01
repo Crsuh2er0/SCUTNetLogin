@@ -1,8 +1,9 @@
 #include "udp/drcom_packet.h"
-#include "network/network.h"
+#include "core/byte_utils.h"
 #include <QDateTime>
 #include <QHostAddress>
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 
 namespace DrcomPacket {
@@ -42,7 +43,10 @@ DrcomMiscInfo buildMiscInfo(const AuthConfig& config, const uint8_t* flux)
     memcpy(info.src_ip,   config.localIp,  4);
     memcpy(info.unknown1, DRCOM_MISC_UNKNOWN1.data(), DRCOM_MISC_UNKNOWN1.size());
 
-    memcpy(info.flux,  flux, 4);
+    if (flux)
+        memcpy(info.flux,  flux, 4);
+    else
+        memset(info.flux, 0, sizeof(info.flux));
     memcpy(info.cks32, DRCOM_MISC_CKSPARAM.data(), DRCOM_MISC_CKSPARAM.size());
 
     // host_info (44 字节): username + hostname 拼接
@@ -55,7 +59,7 @@ DrcomMiscInfo buildMiscInfo(const AuthConfig& config, const uint8_t* flux)
     // DNS (大端序)
     QHostAddress dnsAddr(config.dnsServer);
     if (dnsAddr.protocol() == QAbstractSocket::IPv4Protocol) {
-        Network::ipv4ToBytes(dnsAddr, info.dns1);
+        ByteUtils::ipv4ToBytes(dnsAddr, info.dns1);
         memcpy(info.dns2, info.dns1, 4);
     }
 
@@ -125,11 +129,14 @@ DrcomMiscHeartbeat buildMiscHeartbeat(uint8_t counter, uint8_t hbSubtype,
 
 uint32_t computeCks32(uint8_t* data, size_t len)
 {
+    // 前置条件：缓冲区至少覆盖 cks_temp(28) 与 cks32(24) 区域（调用方传 sizeof(DrcomMiscInfo)）
+    assert(data != nullptr && len >= static_cast<size_t>(DRCOM_MISC_OFFSET_CKS32_TEMP) + 4);
+
     uint8_t saved = data[DRCOM_MISC_OFFSET_CKS32_TEMP];
     data[DRCOM_MISC_OFFSET_CKS32_TEMP] = DRCOM_CKS32_TEMP_VALUE;
 
     uint32_t s = 0;
-    for (size_t i = 0; i < len; i += 4) {
+    for (size_t i = 0; i + 4 <= len; i += 4) {
         uint32_t val;
         memcpy(&val, &data[i], 4);
         s ^= val;
@@ -143,8 +150,11 @@ uint32_t computeCks32(uint8_t* data, size_t len)
 
 uint32_t computeCks16(uint8_t* data, size_t len)
 {
+    // 前置条件：缓冲区至少覆盖 cks16(24) 区域（调用方传 sizeof(DrcomMiscHeartbeat)）
+    assert(data != nullptr && len >= static_cast<size_t>(DRCOM_MISC_OFFSET_CKS32) + 4);
+
     uint16_t s = 0;
-    for (size_t i = 0; i < len; i += 2) {
+    for (size_t i = 0; i + 2 <= len; i += 2) {
         uint16_t val;
         memcpy(&val, &data[i], 2);
         s ^= val;

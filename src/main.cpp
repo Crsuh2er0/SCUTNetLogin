@@ -4,6 +4,7 @@
 #include <QSharedMemory>
 #include <QIcon>
 #include <QFile>
+#include <QCommandLineParser>
 #include <windows.h>
 
 bool isRunningAsAdmin() {
@@ -23,19 +24,26 @@ bool isRunningAsAdmin() {
 int main(int argc, char* argv[]) {
     QApplication a(argc, argv);
     a.setApplicationName("SCUTNetLogin");
+    a.setOrganizationName("SCUTNetLogin");   // QSettings 默认构造（UI 几何记忆）用；不影响 config.ini
     a.setApplicationDisplayName("SCUT 校园网认证");
 
     // 载入图标
     a.setWindowIcon(QIcon(":/SCUTnetwork.ico"));
 
-    // 解析命令行参数
-    bool silentMode = false;
-    for (int i = 1; i < argc; ++i) {
-        QString arg = QString::fromLocal8Bit(argv[i]);
-        if (arg == "--silent" || arg == "--minimized" || arg == "-s") {
-            silentMode = true;
-        }
-    }
+    // 解析命令行参数（QCommandLineParser 处理 Unicode 参数更健壮）
+    QCommandLineParser parser;
+    parser.setApplicationDescription(QStringLiteral("SCUT 校园网认证客户端"));
+    parser.addHelpOption();
+    parser.addOptions({
+        { QStringLiteral("silent"),    QStringLiteral("静默启动：不显示窗口，最小化到托盘") },
+        { QStringLiteral("minimized"), QStringLiteral("同 --silent") },
+        { QStringLiteral("s"),         QStringLiteral("同 --silent") },
+    });
+    parser.process(a);
+
+    const bool silentMode = parser.isSet(QStringLiteral("silent"))
+                            || parser.isSet(QStringLiteral("minimized"))
+                            || parser.isSet(QStringLiteral("s"));
 
     // 单实例检查
     QSharedMemory shared("SCUTNetLogin_SingleInstance");

@@ -22,6 +22,27 @@ struct AppConfig {
     bool    autoConnect     = false;
 };
 
+// UI 数据比较（"保存配置"脏检测等）
+inline bool operator==(const AppConfig& a, const AppConfig& b)
+{
+    return a.username      == b.username
+        && a.password      == b.password
+        && a.host          == b.host
+        && a.dns           == b.dns
+        && a.backupDns     == b.backupDns
+        && a.interfaceName == b.interfaceName
+        && a.manualMac     == b.manualMac
+        && a.manualIp      == b.manualIp
+        && a.manualMask    == b.manualMask
+        && a.manualGateway == b.manualGateway
+        && a.savePassword   == b.savePassword
+        && a.autoSetNetwork == b.autoSetNetwork
+        && a.autoStart      == b.autoStart
+        && a.autoConnect    == b.autoConnect;
+}
+
+inline bool operator!=(const AppConfig& a, const AppConfig& b) { return !(a == b); }
+
 namespace ConfigManager {
 
 // 配置文件默认路径（exe 同目录下的 config.ini）

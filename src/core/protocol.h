@@ -4,12 +4,7 @@
 #include <cstdint>
 #include <QString>
 
-// 日志级别
-enum class LogLevel {
-    Info = 0,
-    Warning = 1,
-    Error = 2
-};
+// 注：LogLevel 枚举已移至 core/log_level.h（独立于协议定义）
 
 #pragma pack(push, 1)
 
@@ -138,7 +133,14 @@ struct DrcomMiscResponseInfo {
 struct DrcomMiscHeartbeatResponse {
     DrcomUdpHeader header;
     uint8_t  hb_subtype;        // 0x02: 回 heartbeat3; 0x04: 周期完成
-    // 如果 hb_subtype == 0x02, 后面还有 flux[4] at offset 16
+};
+
+// --- MiscHeartbeatResponse 扩展: hb_subtype == 0x02 时的完整布局 (20 字节) ---
+// 基础 6 字节之后, offset 16 处跟随 4 字节 flux（RESPONSE1 分支才需要）
+struct DrcomMiscHeartbeatResponseFlux {
+    DrcomMiscHeartbeatResponse base;   // offset 0..5
+    uint8_t  reserved[10];             // offset 6..15 用途不明
+    uint8_t  flux[4];                  // offset 16..19
 };
 
 #pragma pack(pop)
@@ -158,13 +160,17 @@ enum class AuthState {
     Stopped                     // 用户主动断开
 };
 
-// UDP 握手状态枚举（DrCOM UDP 心跳协议状态机）
-enum class UdpState {
-    Idle,                       // 空闲
-    WaitingAliveResponse,       // 已发 MiscAlive，等待 0x02 响应
-    WaitingInfoResponse,        // 已发 MiscInfo，等待 0x04 响应
-    Online,                     // 心跳维持中
-    Stopped                     // 用户主动断开
+// 静态IP配置参数（仅当 autoSetNetwork 时需要）
+// 注：原定义于 session_manager.h，因 ConnectionBuilder / 单元测试需在无
+// SessionManager 重型依赖下引用，故移入纯数据结构头的 protocol.h
+struct StaticIpConfig {
+    QString adapterName;   // netsh 适配器名
+    QString ip;
+    QString mask;
+    QString gateway;
+    QString dns1;
+    QString dns2;
+    QString mac;           // DHCP 恢复用的 MAC 字符串
 };
 
 // 认证配置（跨 EapProcess / UdpProcess 共享）
@@ -177,7 +183,6 @@ struct AuthConfig {
     QString  hostname;          // 本机主机名
     uint8_t  localMac[6] = {};
     uint8_t  localIp[4]  = {};
-    uint8_t  serverIp[4] = {};
 };
 
 #endif // PROTOCOL_H

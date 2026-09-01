@@ -1,7 +1,10 @@
 #include "eap/eap_process.h"
 #include "core/constants.h"
 #include "eap/eapol_packet.h"
+#include "eap/notification_parser.h"
 #include <QThread>
+#include <QDebug>
+#include <pcap.h>
 #include <winsock2.h>
 
 // ============================================================================
@@ -16,7 +19,17 @@ EapProcess::EapProcess(QObject* parent)
 
 EapProcess::~EapProcess()
 {
-    stop();
+    // 静默清理：对象销毁期间不再发信号（stop() 的 deferState/flushPending 在
+    // 析构路径下没有接收者，且可能在跨线程删除时投递无意义的状态变更）。
+    // 线程事件循环已退出，不存在并发槽调用，无需加锁。
+    m_stopRequested = true;
+    m_running       = false;
+    if (m_pollTimer)
+        m_pollTimer->stop();
+    if (m_handle) {
+        sendEapolLogoff();
+        closeDevice();
+    }
 }
 
 void EapProcess::setConfig(AuthConfig config)
@@ -27,7 +40,44 @@ void EapProcess::setConfig(AuthConfig config)
 
 void EapProcess::log(LogLevel level, const QString& msg)
 {
-    emit logMessage(msg, static_cast<int>(level));
+    m_pending.append({PendingSignal::Kind::Log, AuthState::Idle, msg,
+                      QByteArray(), static_cast<int>(level)});
+}
+
+void EapProcess::deferState(AuthState state, const QString& msg, bool retryable)
+{
+    m_pending.append({PendingSignal::Kind::StateChanged, state, msg, QByteArray(), 0, retryable});
+}
+
+void EapProcess::deferEapSuccess(const QByteArray& md5)
+{
+    m_pending.append({PendingSignal::Kind::EapSuccess, AuthState::Idle, QString(), md5, 0});
+}
+
+void EapProcess::deferSleepRequired()
+{
+    m_pending.append({PendingSignal::Kind::SleepRequired, AuthState::Idle, QString(),
+                      QByteArray(), 0});
+}
+
+void EapProcess::flushPending()
+{
+    m_pending.flush([this](const PendingSignal& p) {
+        switch (p.kind) {
+        case PendingSignal::Kind::StateChanged:
+            emit stateChanged(p.state, p.msg, p.retryable);
+            break;
+        case PendingSignal::Kind::EapSuccess:
+            emit eapSuccess(p.md5);
+            break;
+        case PendingSignal::Kind::SleepRequired:
+            emit sleepRequired();
+            break;
+        case PendingSignal::Kind::Log:
+            emit logMessage(p.msg, p.logLevel);
+            break;
+        }
+    });
 }
 
 // ============================================================================
@@ -36,6 +86,10 @@ void EapProcess::log(LogLevel level, const QString& msg)
 
 bool EapProcess::openDevice()
 {
+    // 防御：已有句柄先关闭（重复 start()/restart() 时不泄漏旧 pcap 句柄）
+    if (m_handle)
+        closeDevice();
+
     char errbuf[PCAP_ERRBUF_SIZE];
     QByteArray name = m_config.interfaceName.toLocal8Bit();
     m_handle = pcap_open_live(name.constData(), PCAP_SNAPLEN, 1, PCAP_READ_TIMEOUT, errbuf);
@@ -48,6 +102,11 @@ bool EapProcess::openDevice()
     if (pcap_compile(m_handle, &fp, "ether proto 0x888e", 1, PCAP_NETMASK_UNKNOWN) == 0) {
         pcap_setfilter(m_handle, &fp);
         pcap_freecode(&fp);
+    } else {
+        // 过滤器编译失败不致命：无过滤器也能工作（会收到全部流量），
+        // 记入 UI 日志通道（此前仅 qWarning，用户不可见）
+        log(LogLevel::Warning, QStringLiteral("BPF 过滤器编译失败，将无过滤器运行: ")
+                                   + QString::fromUtf8(pcap_geterr(m_handle)));
     }
     return true;
 }
@@ -74,8 +133,21 @@ QByteArray EapProcess::receivePacket()
 
     struct pcap_pkthdr* header;
     const u_char* pkt_data;
-    if (pcap_next_ex(m_handle, &header, &pkt_data) == 1)
-        return QByteArray(reinterpret_cast<const char*>(pkt_data), header->len);
+    const int ret = pcap_next_ex(m_handle, &header, &pkt_data);
+    if (ret == 1) {
+        m_pcapErrorLogged = false;   // 恢复收包，重置错误节流标志
+        // 注意：用 caplen 而非 len —— pcap 只保证 caplen 字节有效（snaplen 截断
+        // 巨型帧时 len > caplen，按 len 拷贝会越界读）。
+        return QByteArray(reinterpret_cast<const char*>(pkt_data), header->caplen);
+    }
+
+    // ret == -1 表示 pcap 错误（ret == 0 是普通超时，正常忽略）。
+    // 错误通常是持续性的，同一错误只记录一次日志，避免每 20ms 轮询刷屏。
+    if (ret == -1 && !m_pcapErrorLogged) {
+        m_pcapErrorLogged = true;
+        log(LogLevel::Warning, QStringLiteral("pcap 读取错误: ")
+                                   + QString::fromLocal8Bit(pcap_geterr(m_handle)));
+    }
 
     return QByteArray();
 }
@@ -115,8 +187,6 @@ void EapProcess::sendEapolLogoff()
 void EapProcess::sendEapResponse(uint8_t eapType, uint8_t requestId,
                                   const QByteArray& payload, QByteArray& lastPacket)
 {
-    m_currentIdentifier = requestId;
-
     auto frame = EapolPacket::buildEapResponseFrame(m_config.localMac, m_switchMac,
                                                      eapType, requestId, payload);
 
@@ -134,94 +204,31 @@ bool EapProcess::isMulticastMac(const uint8_t* mac)
     return (mac[0] & 0x01) != 0;
 }
 
-bool EapProcess::parsePacket(const QByteArray& data, EAPHeader* outEapHeader,
-                              QByteArray* outPayload)
-{
-    if (data.size() < EAPOL_MIN_FRAME_SIZE)
-        return false;
-
-    const EthHeader* eth = reinterpret_cast<const EthHeader*>(data.data());
-    if (eth->eth_type != htons(ETHERTYPE_EAPOL))
-        return false;
-
-    const EAPOLHeader* eapol = reinterpret_cast<const EAPOLHeader*>(data.data() + ETH_HEADER_SIZE);
-    if (eapol->version != EAPOL_VERSION || eapol->packet_type != EAPOL_TYPE_EAP_PACKET)
-        return false;
-
-    *outEapHeader = *reinterpret_cast<const EAPHeader*>(data.data() + EAP_HEADER_OFFSET);
-
-    int payloadOffset = EAP_HEADER_OFFSET + 4 + (outEapHeader->type != 0 ? 1 : 0);
-    int payloadSize   = ntohs(outEapHeader->length) - 5;
-
-    if (payloadSize > 0 && data.size() >= payloadOffset + payloadSize)
-        *outPayload = data.mid(payloadOffset, payloadSize);
-
-    return true;
-}
-
 // ============================================================================
-// 服务器通知解析 — 数据驱动查表，消除 if-else 链
+// 服务器通知解析 — 数据驱动查表已提取为纯函数 NotificationParser::describe
+// （见 eap/notification_parser.h，可独立单测）。此处仅保留 EapProcess 侧副作用：
+// 日志、夜间休眠（sleepRequired）、永久错误标记（retryable=false）。
 // ============================================================================
 
 void EapProcess::parseNotification(const QString& msg)
 {
     log(LogLevel::Error, QStringLiteral("服务器通知: ") + msg);
 
-    // --- Code-based 错误: "prefix + code" 格式 ---
-    struct CodePattern {
-        QStringView prefix;
-        int         codeOffset;  // code 子串起始位置（从 prefix 尾部算起）
-    };
-    static const CodePattern kCodePatterns[] = {
-        { QStringLiteral("userid error"),                 13 },
-        { QStringLiteral("Authentication Fail ErrCode="), 28 },
-    };
-
-    // "code → 中文描述" 查找表（两个 pattern 共享），sleepReq 标记需休眠等待
-    struct CodeMessage { QStringView code; const char* msg; bool sleepReq = false; };
-    static const CodeMessage kCodeMessages[] = {
-        { QStringLiteral("0"),  "用户名或密码错误" },
-        { QStringLiteral("1"),  "账号不存在" },
-        { QStringLiteral("2"),  "用户名或密码错误" },
-        { QStringLiteral("3"),  "用户名或密码错误" },
-        { QStringLiteral("4"),  "该账号可能已过期" },
-        { QStringLiteral("5"),  "该账号已被停用" },
-        { QStringLiteral("9"),  "该账号可能已过期" },
-        { QStringLiteral("11"), "不允许进行RADIUS认证" },
-        { QStringLiteral("16"), "当前时段禁止上网，程序将休眠等待", true },
-        { QStringLiteral("30"), "该账号流量/时长已用尽" },
-        { QStringLiteral("63"), "该账号流量/时长已用尽" },
-    };
-
-    for (const auto& pattern : kCodePatterns) {
-        if (!msg.startsWith(pattern.prefix))
-            continue;
-
-        QStringView code = QStringView(msg).mid(pattern.codeOffset).trimmed();
-        for (const auto& cm : kCodeMessages) {
-            if (code == cm.code) {
-                log(LogLevel::Error, cm.msg);
-                if (cm.sleepReq)
-                    emit sleepRequired();
-                return;
-            }
-        }
-        return;  // prefix 匹配但 code 未知 — 不再尝试其他 pattern
+    const NotificationParser::Result r = NotificationParser::describe(msg);
+    if (r.description.isEmpty()) {
+        // 未识别的通知：仅记录原文，保持原行为
+        return;
     }
 
-    // --- 简单前缀匹配错误（无 code） ---
-    static const struct { QStringView prefix; const char* msg; } kSimpleErrors[] = {
-        { QStringLiteral("AdminReset"),           "管理员已重置连接" },
-        { QStringLiteral("Mac, IP, NASip, PORT"), "当前IP/MAC地址不允许登录" },
-        { QStringLiteral("flowover"),             "流量已用尽" },
-        { QStringLiteral("In use"),               "该账号正在使用中（多设备在线）" },
-    };
-
-    for (const auto& entry : kSimpleErrors) {
-        if (msg.startsWith(entry.prefix)) {
-            log(LogLevel::Error, entry.msg);
-            return;
-        }
+    log(LogLevel::Error, r.description);
+    if (r.sleepRequired) {
+        deferSleepRequired();
+    } else if (r.permanent) {
+        // 永久性错误：立即判定认证失败且不可自动重试。
+        // 服务器在 Notification 后通常还会发送 EAP-Failure 帧，故同时记录
+        // m_permanentFailure，使后续 Failure 帧的 Failed 状态也携带 retryable=false。
+        m_permanentFailure = true;
+        deferState(AuthState::Failed, QStringLiteral("认证失败"), /*retryable=*/false);
     }
 }
 
@@ -258,12 +265,19 @@ void EapProcess::start()
 {
     QMutexLocker locker(&m_mutex);
 
+    // 会话代数：使先前 start() 遗留的异步单发定时器（2 秒端口清理）失效
+    const int gen = ++m_startGeneration;
+
     m_running       = true;
     m_stopRequested = false;
     m_currentState  = AuthState::Idle;
+    m_permanentFailure = false;
+    m_pcapErrorLogged  = false;
 
     if (!openDevice()) {
-        emit stateChanged(AuthState::Failed, "打开网卡失败: " + m_lastError);
+        deferState(AuthState::Failed, "打开网卡失败: " + m_lastError);
+        locker.unlock();
+        flushPending();
         return;
     }
 
@@ -273,27 +287,37 @@ void EapProcess::start()
         connect(m_pollTimer, &QTimer::timeout, this, &EapProcess::onPollTimeout);
     }
 
-    emit stateChanged(AuthState::SendingStart, "清理端口状态...");
+    deferState(AuthState::SendingStart, "清理端口状态...");
     sendEapolLogoff();
 
-    QTimer::singleShot(PORT_CLEANUP_WAIT, this, [this]() {
+    QTimer::singleShot(PORT_CLEANUP_WAIT, this, [this, gen]() {
         QMutexLocker l(&m_mutex);
-        if (!m_running || m_stopRequested)
+        // 代数守卫：stop()/restart() 已换代 -> 本次 start() 的清理定时器作废，
+        // 避免"断开后 2 秒内重连"时旧定时器对第二次会话发多余的 EAPOL-Start
+        // 并把状态机打回 SendingStart
+        if (gen != m_startGeneration || !m_running || m_stopRequested)
             return;
 
-        emit stateChanged(AuthState::SendingStart, "发送探测请求...");
+        deferState(AuthState::SendingStart, "发送探测请求...");
         sendEapolStart();
         m_currentState = AuthState::SendingStart;
 
         m_retransmitTimer.start();
         m_pollTimer->start();
+
+        l.unlock();
+        flushPending();
     });
+
+    locker.unlock();
+    flushPending();
 }
 
 void EapProcess::stop()
 {
     QMutexLocker locker(&m_mutex);
 
+    ++m_startGeneration;   // 使本会话遗留的异步单发定时器失效
     m_stopRequested = true;
     m_running       = false;
 
@@ -306,7 +330,37 @@ void EapProcess::stop()
     closeDevice();
 
     m_currentState = AuthState::Stopped;
-    emit stateChanged(AuthState::Stopped, "已断开");
+    deferState(AuthState::Stopped, "已断开");
+
+    locker.unlock();
+    flushPending();
+}
+
+void EapProcess::restart()
+{
+    // 自动重连专用：原子"复位 + 重启"。持锁完成设备复位（含 EAPOL-Logoff），
+    // 不发射 Stopped 状态信号（重连期上层状态为 Authenticating，Stopped 会把
+    // 应用状态机错误回退为 Disconnected）；设备关闭/重开完成后再调用 start()。
+    {
+        QMutexLocker locker(&m_mutex);
+
+        ++m_startGeneration;   // 作废先前 start() 遗留的异步定时器
+        m_stopRequested = true;
+        m_running       = false;
+
+        if (m_pollTimer)
+            m_pollTimer->stop();
+
+        if (m_handle)
+            sendEapolLogoff();
+
+        closeDevice();
+
+        m_currentState = AuthState::Stopped;
+    }
+
+    // 重新加锁执行启动（start() 内部会取新代数并复位全部会话状态）
+    start();
 }
 
 // ============================================================================
@@ -316,7 +370,10 @@ void EapProcess::stop()
 QVector<QByteArray> EapProcess::drainPackets()
 {
     QVector<QByteArray> packets;
-    while (true) {
+    // 每轮上限：pcap 读超时 1ms，恶意/异常 EAPOL 洪泛时无上限循环会长时间
+    // 持锁占用 m_mutex 并阻塞日志与状态信号；余量留到下一轮 20ms 轮询。
+    constexpr int kMaxPacketsPerRound = 64;
+    while (packets.size() < kMaxPacketsPerRound) {
         QByteArray packet = receivePacket();
         if (packet.isEmpty())
             break;
@@ -328,6 +385,10 @@ QVector<QByteArray> EapProcess::drainPackets()
 // 返回 false 表示致命错误，调用者须 unlock 后调用 stop()
 bool EapProcess::processEapPacket(const QByteArray& packet)
 {
+    // 防御：捕获到短于以太网头的畸形帧时直接跳过，避免对 eth 头部越界读
+    if (packet.size() < ETH_HEADER_SIZE)
+        return true;
+
     const EthHeader* eth = reinterpret_cast<const EthHeader*>(packet.data());
 
     // 早期握手中嗅探交换机 MAC（用于后续单播）
@@ -338,10 +399,11 @@ bool EapProcess::processEapPacket(const QByteArray& packet)
 
     EAPHeader eapHeader;
     QByteArray payload;
-    if (!parsePacket(packet, &eapHeader, &payload))
+    if (!EapolPacket::parseEapPacket(packet, &eapHeader, &payload))
         return true;  // 非 EAP 包，跳过
 
     m_retransmitTimer.restart();
+    m_retransmitLogCount = 0;   // 收到有效 EAP 包，重置重发日志节流计数
 
     if (eapHeader.code == EAP_CODE_REQUEST) {
         handleEapRequest(eapHeader, payload);
@@ -349,13 +411,15 @@ bool EapProcess::processEapPacket(const QByteArray& packet)
         if (m_currentState != AuthState::Authenticated) {
             log(LogLevel::Info, QStringLiteral("802.1X 认证成功！保持后台监听心跳..."));
             m_currentState = AuthState::Authenticated;
-            emit stateChanged(AuthState::Authenticated, QStringLiteral("认证成功"));
-            emit eapSuccess(m_md5Result);
+            deferState(AuthState::Authenticated, QStringLiteral("认证成功"));
+            deferEapSuccess(m_md5Result);
         }
     } else if (eapHeader.code == EAP_CODE_FAILURE) {
         log(LogLevel::Error, QStringLiteral("认证被拒绝 (可能是冷却期，稍等1分钟再试)"));
         m_currentState = AuthState::Failed;
-        emit stateChanged(AuthState::Failed, QStringLiteral("认证失败"));
+        // 若本次认证已被 Notification 判定为永久性错误（如密码错误），
+        // 携带 retryable=false，上层停止自动重试
+        deferState(AuthState::Failed, QStringLiteral("认证失败"), !m_permanentFailure);
         return false;  // 致命错误，调用者负责 stop()
     }
 
@@ -405,7 +469,10 @@ void EapProcess::checkRetransmit()
         return;
 
     if (m_retransmitTimer.hasExpired(EAP_RETRANSMIT_INTERVAL)) {
-        log(LogLevel::Warning, QStringLiteral("等待交换机响应中..."));
+        // 节流：首次与每第 N 次重发才记日志，避免长时间无响应时每 3s 刷屏
+        if (++m_retransmitLogCount == 1
+            || m_retransmitLogCount % RETRANSMIT_LOG_INTERVAL == 0)
+            log(LogLevel::Warning, QStringLiteral("等待交换机响应中..."));
         onTimeout();
         m_retransmitTimer.restart();
     }
@@ -429,11 +496,16 @@ void EapProcess::onPollTimeout()
         }
     }
 
+    // 处理与日志均在持锁状态下仅做缓冲，解锁后统一发出
     if (fatalError) {
         locker.unlock();
-        stop();
+        flushPending();
+        stop();          // stop() 自身也会解锁后 flush
         return;
     }
 
     checkRetransmit();
+
+    locker.unlock();
+    flushPending();
 }

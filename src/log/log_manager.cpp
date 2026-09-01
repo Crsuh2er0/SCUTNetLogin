@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFile>
 #include <QTextStream>
+#include <QDebug>
 
 // ============================================================================
 // 构造
@@ -18,21 +19,43 @@ LogManager::LogManager(QObject* parent)
 // 文件持久化（槽）
 // ============================================================================
 
+LogManager::~LogManager()
+{
+    if (m_logFile.isOpen())
+        m_logFile.close();
+}
+
 void LogManager::onLogMessage(const QString& message, int level)
 {
+    ensureFileForDate();
+    if (!m_logFile.isOpen())
+        return;   // 打开失败静默丢弃，不影响主流程
+
+    QTextStream stream(&m_logFile);
+    stream << fileTimestamp()
+           << " [" << levelTag(level) << "] "
+           << message << Qt::endl;
+    stream.flush();   // 立即落盘，避免崩溃/退出时丢失
+}
+
+void LogManager::ensureFileForDate()
+{
+    const QString date = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd"));
+    if (m_logFile.isOpen() && m_currentLogDate == date)
+        return;
+
+    // 跨日轮转：先关闭旧文件再打开当日文件
+    if (m_logFile.isOpen())
+        m_logFile.close();
+
     QDir().mkpath(logDir());
-
-    const QString fileName = logDir() + QStringLiteral("/SCUTNetLogin_")
-                             + QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd"))
-                             + QStringLiteral(".log");
-
-    QFile logFile(fileName);
-    if (logFile.open(QIODevice::Append | QIODevice::Text)) {
-        QTextStream stream(&logFile);
-        stream << fileTimestamp()
-               << " [" << levelTag(level) << "] "
-               << message << Qt::endl;
+    m_logFile.setFileName(logDir() + QStringLiteral("/SCUTNetLogin_") + date + QStringLiteral(".log"));
+    if (!m_logFile.open(QIODevice::Append | QIODevice::Text)) {
+        // 打开失败静默跳过日志（不影响主流程），记录一次警告便于排查
+        qWarning().noquote() << "无法打开日志文件:" << m_logFile.fileName()
+                             << m_logFile.errorString();
     }
+    m_currentLogDate = date;
 }
 
 // ============================================================================

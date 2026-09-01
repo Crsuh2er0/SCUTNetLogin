@@ -16,7 +16,7 @@ namespace DrcomPacket {
 DrcomMiscAlive buildMiscAlive();
 
 // 构造 MiscInfo 设备信息包（244 字节）
-// 注：调用者须在返回后用 computeCks32 计算校验和，并将结果覆盖 m_md5Data 前 4 字节
+// 注：调用者须在返回后用 computeCks32 计算校验和（结果写入包内 offset 24）
 DrcomMiscInfo buildMiscInfo(const AuthConfig& config, const uint8_t* flux);
 
 // 构造 Alive 在线保活包（38 字节）
@@ -28,13 +28,16 @@ DrcomMiscHeartbeat buildMiscHeartbeat(uint8_t counter, uint8_t hbSubtype,
                                        const uint8_t* rnd, const uint8_t* flux,
                                        const uint8_t* localIp);
 
-// MiscInfo 包 32 位校验和（会修改 data 中 DRCOM_MISC_OFFSET_CKS32 位置的 4 字节）
+// MiscInfo 包 32 位校验和。会把结果写回 data 中 DRCOM_MISC_OFFSET_CKS32 的 4 字节，
+// 因此【不可重复调用】：同缓冲区二次计算时 offset 24 已非种子，结果不同。
+// 契约：每包由 buildMiscInfo 构建后调用一次。
 uint32_t computeCks32(uint8_t* data, size_t len);
 
-// Heartbeat 包 16 位校验和（会修改 data 中 DRCOM_MISC_OFFSET_CKS32 位置的 4 字节）
+// Heartbeat 包 16 位校验和。同上：写回 offset 24，每包仅调用一次。
 uint32_t computeCks16(uint8_t* data, size_t len);
 
-// DrCOM 私有循环左移加解密（对称算法）
+// DrCOM 私有"循环左移 i&7 位"变换。收发双方用同一变换构成对称，
+// 但变换本身不是自反的（连续应用两次 ≠ 原值）。服务器密文经本函数还原。
 void decryptDrcom(const uint8_t* encrypted, uint8_t* output, size_t size);
 
 } // namespace DrcomPacket

@@ -66,6 +66,10 @@ constexpr uint16_t DRCOM_UDP_PORT = 61440;
 constexpr int DRCOM_HEARTBEAT_INTERVAL = 30000;
 constexpr int DRCOM_HEARTBEAT_TIMEOUT  = 10000;
 
+// MiscInfo 发送失败重试（本机 MAC/IP 未就绪时的观测层重试；不影响认证流程）
+constexpr int DRCOM_MISC_INFO_RETRY_INTERVAL = 5000;   // 重试间隔 (ms)
+constexpr int DRCOM_MISC_INFO_MAX_RETRIES    = 3;      // 最大重试次数
+
 // UDP 包类型标记（第 0 字节）
 constexpr uint8_t DRCOM_UDP_MAGIC = 0x07;
 // Alive 包类型标记
@@ -165,6 +169,8 @@ constexpr size_t DRCOM_MISC_ALIVE_SIZE = 8;
 
 // 认证超时 & 重发间隔 (ms)
 constexpr int EAP_RETRANSMIT_INTERVAL = 3000;
+// "等待交换机响应" 日志节流：每重发多少次才记录一条（默认每 5 次 ≈ 15s 一条）
+constexpr int RETRANSMIT_LOG_INTERVAL = 5;
 // pcap 收包超时 (ms) — 必须为 1ms，配合 20ms 轮询计时器使用
 constexpr int PCAP_READ_TIMEOUT = 1;
 
@@ -192,6 +198,9 @@ constexpr int IP_SETUP_TIMEOUT = 30000;
 constexpr int AUTO_CONNECT_DELAY = 800;
 // 静默启动连接延迟 (ms)
 constexpr int SILENT_CONNECT_DELAY = 1000;
+// 自动连接失败后的重试 —— 登录早期网卡可能尚未就绪（Npcap 未枚举 / 静态IP的MAC未取到）
+constexpr int AUTO_CONNECT_RETRY_COUNT = 5;        // 未能启动连接时的后续重试次数
+constexpr int AUTO_CONNECT_RETRY_INTERVAL = 3000;  // 每次重试间隔 (ms)
 // 网卡清理等待 (ms)
 constexpr int PORT_CLEANUP_WAIT = 2000;
 // 静态 IP 设置后等待 (ms)

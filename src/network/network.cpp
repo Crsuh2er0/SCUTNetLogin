@@ -1,6 +1,7 @@
 #define _WIN32_WINNT 0x0601
 
 #include "network/network.h"
+#include "core/byte_utils.h"
 #include "core/constants.h"
 #include <winsock2.h>
 #include <windows.h>
@@ -108,7 +109,7 @@ static QString findAdapterGuidByMac(const QString& normalizedMac)
 {
     // Try Qt first
     for (const QNetworkInterface& iface : QNetworkInterface::allInterfaces()) {
-        if (normalizeMac(iface.hardwareAddress()) == normalizedMac)
+        if (ByteUtils::normalizeMac(iface.hardwareAddress()) == normalizedMac)
             return iface.name();
     }
 
@@ -131,7 +132,7 @@ QString adapterNameByMac(const QString& mac)
     if (mac.isEmpty())
         return QString();
 
-    QString normalized = normalizeMac(mac);
+    QString normalized = ByteUtils::normalizeMac(mac);
     if (normalized.isEmpty())
         return QString();
 
@@ -193,6 +194,9 @@ QList<InterfaceEntry> listInterfaces()
                 result.append({displayName, name, false});
         }
         pcap_freealldevs(alldevs);
+    } else {
+        // 枚举失败（如 Npcap 未安装）：记录原因，返回空列表由 UI 提示
+        qWarning().noquote() << "pcap_findalldevs failed:" << errbuf;
     }
 
     // Wi-Fi 网卡排到列表末尾，加前缀区分
@@ -200,43 +204,6 @@ QList<InterfaceEntry> listInterfaces()
         result.append({QStringLiteral("[Wi-Fi] ") + w.displayName, w.pcapName, true});
 
     return result;
-}
-
-// ============================================================================
-// 通用工具函数
-// ============================================================================
-
-QString normalizeMac(const QString& mac)
-{
-    QString hex = mac;
-    hex.remove(':');
-    hex.remove('-');
-    if (hex.size() != 12)
-        return QString();
-    return hex.toUpper();
-}
-
-void ipv4ToBytes(const QHostAddress& addr, uint8_t* out)
-{
-    quint32 ipv4 = addr.toIPv4Address();
-    out[0] = (ipv4 >> 24) & 0xFF;
-    out[1] = (ipv4 >> 16) & 0xFF;
-    out[2] = (ipv4 >> 8) & 0xFF;
-    out[3] = ipv4 & 0xFF;
-}
-
-bool isMacZero(const uint8_t* mac)
-{
-    for (int i = 0; i < 6; ++i)
-        if (mac[i]) return false;
-    return true;
-}
-
-bool isIpZero(const uint8_t* ip)
-{
-    for (int i = 0; i < 4; ++i)
-        if (ip[i]) return false;
-    return true;
 }
 
 // ============================================================================
@@ -252,6 +219,10 @@ bool runNetsh(const QStringList& args, QString* errorMsg)
     proc.start("netsh", args);
 
     if (!proc.waitForFinished(NETSH_TIMEOUT)) {
+        // 显式终止挂起的 netsh（QProcess 析构也会杀，但显式 kill 保证
+        // 错误信息可读且不依赖析构时序）
+        proc.kill();
+        proc.waitForFinished(2000);
         if (errorMsg) {
             *errorMsg = QString("netsh 命令超时 (%1 秒): %2")
                             .arg(NETSH_TIMEOUT / 1000)

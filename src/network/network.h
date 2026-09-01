@@ -35,17 +35,7 @@ QString adapterNameByMac(const QString& mac);
 // 枚举所有可用于认证的 Npcap 网卡（自动过滤 loopback / 虚拟机适配器）
 QList<InterfaceEntry> listInterfaces();
 
-// MAC 地址标准化：去分隔符、转大写，非法格式返回空字符串
-QString normalizeMac(const QString& mac);
-
-// IPv4 地址转大端序字节数组
-void ipv4ToBytes(const QHostAddress& addr, uint8_t* out);
-
-// 检查 6 字节 MAC 地址是否全零
-bool isMacZero(const uint8_t* mac);
-
-// 检查 4 字节 IPv4 地址是否全零
-bool isIpZero(const uint8_t* ip);
+// 注：MAC 标准化、IPv4 转字节、全零判断等纯函数已移至 core/byte_utils.h
 
 // netsh 命令执行
 bool runNetsh(const QStringList& args, QString* errorMsg = nullptr);
