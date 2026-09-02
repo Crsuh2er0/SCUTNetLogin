@@ -191,7 +191,10 @@ constexpr const char* DEFAULT_DNS = "202.38.193.33";
 // 六·二、无线 Portal（DrCOM eportal）认证常量 — s.scut.edu.cn
 // ============================================================================
 
-// eportal 认证 API 端口（chkstatus/logout 走标准 443，login 走 801）
+// eportal 认证 API 端口：login/logout 走 801，且为纯 HTTP（无 TLS）。
+// 实测 s.scut.edu.cn:801 用 TLS 握手会被服务器拒绝（SEC_E_INVALID_TOKEN），
+// 443 仅服务 / 首页、/drcom/chkstatus 与 /drcom/logout；
+// login/logout 的 scheme 见 portal_protocol.cpp（http）。
 constexpr uint16_t PORTAL_LOGIN_PORT = 801;
 // HTTP 请求超时 (ms)
 constexpr int PORTAL_REQUEST_TIMEOUT = 8000;

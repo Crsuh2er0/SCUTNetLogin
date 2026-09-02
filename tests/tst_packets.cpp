@@ -674,17 +674,18 @@ void TestPackets::portal_buildUrls()
     QCOMPARE(chk.toString(QUrl::FullyEncoded),
              QStringLiteral("https://s.scut.edu.cn/drcom/chkstatus?callback=dr1002&v=12345"));
 
-    // logout：443 + /drcom/logout + dr1006 回调
+    // logout：HTTP 801 + /eportal/?c=ACSetting&a=Logout（门户配置 authlogoutpath）
     const auto out = PortalProtocol::buildLogoutUrl(QStringLiteral("s.scut.edu.cn"), 7);
     QCOMPARE(out.toString(QUrl::FullyEncoded),
-             QStringLiteral("https://s.scut.edu.cn/drcom/logout?callback=dr1006&jsVersion=3.3.2&v=7&lang=zh"));
+             QStringLiteral("http://s.scut.edu.cn:801/eportal/?c=ACSetting&a=Logout&ver=1.0&callback=dr1006&jsVersion=3.3.2&v=7&lang=zh"));
 
-    // login：801 端口 + /eportal/，user_account 带 ",0," 前缀并整体 URL 编码，
+    // login：HTTP 801（纯 HTTP，非 TLS）+ /eportal/，user_account 带 ",0," 前缀并整体 URL 编码，
     // 密码中的 URL 保留字符（& = @）必须被编码（与浏览器 encodeURIComponent 行为一致）
     const auto url = PortalProtocol::buildLoginUrl(QStringLiteral("s.scut.edu.cn"),
                                                    QStringLiteral("2026xxxx"),
                                                    QStringLiteral("p@ss&word=1"),
                                                    QStringLiteral("172.18.1.2"), 99);
+    QCOMPARE(url.scheme(), QStringLiteral("http"));   // 801 为纯 HTTP（实测非 TLS）
     QCOMPARE(url.host(), QStringLiteral("s.scut.edu.cn"));
     QCOMPARE(url.port(), 801);
     QCOMPARE(url.path(), QStringLiteral("/eportal/"));

@@ -8,12 +8,17 @@
 // ============================================================================
 // 无线 Portal（DrCOM eportal）协议纯函数 — URL 构造 / JSONP 解析 / 响应分类
 //
-// 协议逆向自 SCUT 无线认证门户（s.scut.edu.cn，DrCOM eportal 部署，
-// 参考同类开源实现 sxdl/wifi-auto-login 的实测抓包）：
-//   chkstatus : GET https://<host>/drcom/chkstatus?callback=dr1002   在线状态 + 本机 IP
-//   login     : GET https://<host>:801/eportal/?c=Portal&a=login...  登录（user_account 须带 ",0," 前缀）
-//   logout    : GET https://<host>/drcom/logout?callback=dr1006      注销
-// 响应均为 JSONP：callback({"result":1,"msg":"...","v46ip":"..."})。
+// 协议逆向自 SCUT 无线认证门户（s.scut.edu.cn，DrCOM eportal 部署）：
+//   登录门户页 https://s.scut.edu.cn/ 的 JS 配置（a41.js / 内联配置）给出：
+//     authloginpath='/eportal/?c=ACSetting&a=Login'  authloginport=801 （纯 HTTP）
+//     authlogoutpath='/eportal/?c=ACSetting&a=Logout&ver=1.0'           （纯 HTTP 801）
+//   在线状态则走 443：
+//     chkstatus : GET https://<host>/drcom/chkstatus?callback=dr1002   在线状态 + 本机 IP
+//   响应均为 JSONP：callback({"result":1,"msg":"...","v46ip":"..."})。
+//
+// 注意：不能把 login 放在 443 —— eportal 的 login/logout 只监听 801，且是
+// 纯 HTTP（非 TLS）；实测 801 上用 TLS 握手会被服务器拒绝（SEC_E_INVALID_TOKEN）。
+// 443 只服务 / 首页、/drcom/chkstatus 与 /drcom/logout。
 //
 // 本模块只做纯数据变换（无 QNetworkAccessManager / 线程依赖），
 // 与 eapol_packet / drcom_packet 同定位，可被单元测试直接编译。
@@ -34,11 +39,13 @@ struct PortalResponse {
 // 在线状态查询（HTTPS 443）
 QUrl buildChkstatusUrl(const QString& host, int v);
 
-// Portal 登录（HTTPS 801，user_account 自动拼接 ",0," 前缀 = PC 设备类型标记）
+// Portal 登录（HTTP 801，user_account 自动拼接 ",0," 前缀 = PC 设备类型标记）
+// 路径：/eportal/?c=Portal&a=login（门户配置 authloginpath 为 ACSetting&a=Login，
+// 但门户页 JS 实际会跳转到 c=Portal&a=login 接口，两者等价且后者为移动端/PC 通用）
 QUrl buildLoginUrl(const QString& host, const QString& username,
                    const QString& password, const QString& userIp, int v);
 
-// Portal 注销（HTTPS 443）
+// Portal 注销（HTTP 801，门户配置 authlogoutpath）
 QUrl buildLogoutUrl(const QString& host, int v);
 
 // --- 响应解析 / 分类 ---

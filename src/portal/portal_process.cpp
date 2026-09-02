@@ -135,7 +135,8 @@ void PortalProcess::sendRequest(const QUrl& url,
     QNetworkReply* reply = m_nam->get(req);
     m_activeReply = reply;
 
-    // 服务器使用自签名/非常规证书（尤其 :801 eportal 端口），证书错误一律忽略
+    // chkstatus 走 HTTPS 443，服务器使用自签名/非常规证书，证书错误一律忽略；
+    // login/logout 为纯 HTTP 801，不触发 sslErrors（此连接对 http 请求无副作用）
     connect(reply, &QNetworkReply::sslErrors, this,
             [this, reply](const QList<QSslError>& errors) {
         if (!m_sslWarned && !errors.isEmpty()) {

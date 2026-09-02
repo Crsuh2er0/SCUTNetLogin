@@ -11,6 +11,15 @@ namespace PortalProtocol {
 // query 中各参数显式用 QUrl::toPercentEncoding 编码（逗号 / & / = / @ 等
 // 在密码中常见），保证与浏览器端 eportal JS 的 encodeURIComponent 行为一致；
 // 固定参数（c=Portal 等）均为安全字符，直接拼接。
+//
+// 端口约定（实测自 s.scut.edu.cn）：
+//   - chkstatus : HTTPS 443  /drcom/chkstatus
+//   - login     : HTTP  801  /eportal/?c=Portal&a=login  （801 仅纯 HTTP，
+//                 门户配置 authloginpath/authloginport 亦为 801，无 TLS）
+//   - logout    : HTTP  801  /eportal/?c=ACSetting&a=Logout&ver=1.0
+//                 （门户配置 authlogoutpath；443 /drcom/logout 亦可但返回
+//                 的是 html 而非 JSONP，统一走 801 保证可解析）
+// 故 login/logout 的 scheme 为 http 而非 https。
 // ---------------------------------------------------------------------------
 
 QUrl buildChkstatusUrl(const QString& host, int v)
@@ -31,7 +40,7 @@ QUrl buildLoginUrl(const QString& host, const QString& username,
     const QString userAccount = QStringLiteral(",0,") + username;
 
     QUrl url;
-    url.setScheme(QStringLiteral("https"));
+    url.setScheme(QStringLiteral("http"));   // 801 为纯 HTTP（见注释）
     url.setHost(host);
     url.setPort(PORTAL_LOGIN_PORT);
     url.setPath(QStringLiteral("/eportal/"));
@@ -54,10 +63,12 @@ QUrl buildLoginUrl(const QString& host, const QString& username,
 QUrl buildLogoutUrl(const QString& host, int v)
 {
     QUrl url;
-    url.setScheme(QStringLiteral("https"));
+    url.setScheme(QStringLiteral("http"));   // 801 为纯 HTTP（见注释）
     url.setHost(host);
-    url.setPath(QStringLiteral("/drcom/logout"));
-    url.setQuery(QStringLiteral("callback=dr1006&jsVersion=%1&v=%2&lang=zh")
+    url.setPort(PORTAL_LOGIN_PORT);
+    url.setPath(QStringLiteral("/eportal/"));
+    url.setQuery(QStringLiteral("c=ACSetting&a=Logout&ver=1.0")
+                 + QStringLiteral("&callback=dr1006&jsVersion=%1&v=%2&lang=zh")
                      .arg(QLatin1String(PORTAL_JS_VERSION)).arg(v));
     return url;
 }
