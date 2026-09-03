@@ -680,10 +680,11 @@ void SessionManager::scheduleNextRetry(const QString& nightMessage)
 void SessionManager::handleAuthFailed(bool retryable, const QString& nightMessage)
 {
     if (retryable) {
-        // 与时段相关的失败（夜间 6:00 / 白天 5 分钟间隔同一套调度）
+        // 与时段相关的失败（夜间 6:00 / 白天 5 分钟间隔同一套调度）。
+        // 【不要】在此进入就绪监听：那会让 onAutoWaitTick 2 秒内再次触发认证，
+        // 失败→再监听 无限刷屏，并绕过夜间 6:00 / 5 分钟节流。失败重试只走
+        // scheduleNextRetry 的定时（到点 onReconnectTimeout 再按需重建监听）。
         scheduleNextRetry(nightMessage);
-        // 失败后立即进入就绪监听：检测到有线接入/匹配 Wi-Fi 连上即再次认证（比 5 分钟更快）
-        startAutoWait();
     } else {
         // 永久性错误（凭证/账户状态）：停止自动重试
         if (m_reconnectTimer)
