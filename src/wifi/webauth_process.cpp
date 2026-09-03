@@ -169,6 +169,7 @@ void WebAuthProcess::start()
         m_running = true;
         m_pending.clear();
         m_confirmAttempts = 0;
+        m_onlineNotified = false;   // 新会话：需重新宣告在线（避免跨轮询沿用旧标记）
     }
 
     // 首次启动时在工作线程内创建网络管理器与定时器（线程亲和）
@@ -446,10 +447,10 @@ void WebAuthProcess::queryOnlineStatus()
         const QJsonObject json = PortalParser::extractJsonp(body);
         const QJsonArray list = json.value(QStringLiteral("list")).toArray();
         if (json.value(QStringLiteral("result")).toInt(-1) == 1 && !list.isEmpty()) {
-            // 归属校验：多端共享网关/同网段时列表可能仅含他机会话，不算本机在线
+            // 归属校验：多端共享网关/同网段时列表可能仅含他机会话，不算本机在线。
+            // 在线的确认日志/Online 信号由 finishOnline 仅在首次上线时打印（防轮询刷屏）
             if (PortalParser::isOwnSession(list.first().toObject(),
                                            wifiIpString(), m_config.username, wifiMacHex())) {
-                deferLog(QStringLiteral("门户确认当前在线"), 0);
                 finishOnline();
                 return;
             }
@@ -751,9 +752,15 @@ void WebAuthProcess::finishOnline()
     if (staleGen(gen))
         return;
 
-    deferState(WifiAuthState::Online, QStringLiteral("无线校园网已认证"));
-    deferOnline();
-    flushPending();
+    // 仅"首次上线"打印确认日志并发射 Online 信号；此后 60 秒在线轮询命中
+    // 在线时静默续跑（只重启轮询），避免每轮重复打印"确认在线/已认证"刷屏
+    if (!m_onlineNotified) {
+        m_onlineNotified = true;
+        deferLog(QStringLiteral("门户确认当前在线"), 0);
+        deferState(WifiAuthState::Online, QStringLiteral("无线校园网已认证"));
+        deferOnline();
+        flushPending();
+    }
     if (m_pollTimer) {
         m_pollTimer->stop();
         m_pollTimer->start();

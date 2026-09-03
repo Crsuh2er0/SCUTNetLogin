@@ -127,6 +127,9 @@ private:
     int     m_confirmAttempts = 0;    // 上线确认已尝试次数
     int     m_portalFetchRetries = 0; // 门户页抓取瞬态失败重试计数
     int     m_loadConfigRetries = 0;  // loadConfig 瞬态失败重试计数
+    // 本次会话是否已向上层宣告"在线"（首次上线才打印确认日志/发 Online 信号；
+    // 60 秒在线轮询命中在线时静默续跑，避免重复刷屏）
+    bool    m_onlineNotified = false;
     PortalParser::PortalVars m_vars;  // 门户解析结果（本轮）
 
     // 信号缓冲（持锁 append、解锁 flush，与 EAP/UDP 同惯例）
