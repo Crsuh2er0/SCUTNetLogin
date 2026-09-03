@@ -21,6 +21,7 @@ struct AppConfig {
     bool    autoSetNetwork  = false;
     bool    autoStart       = false;
     bool    autoConnect     = false;
+    bool    debug           = false;  // 调试开关：产出请求/响应级调试日志（含脱敏 URL）
 };
 
 // UI 数据比较（"保存配置"脏检测等）
@@ -40,7 +41,8 @@ inline bool operator==(const AppConfig& a, const AppConfig& b)
         && a.savePassword   == b.savePassword
         && a.autoSetNetwork == b.autoSetNetwork
         && a.autoStart      == b.autoStart
-        && a.autoConnect    == b.autoConnect;
+        && a.autoConnect    == b.autoConnect
+        && a.debug          == b.debug;
 }
 
 inline bool operator!=(const AppConfig& a, const AppConfig& b) { return !(a == b); }

@@ -80,5 +80,14 @@ website/
 SCUT校园网DrCOM认证流程.md
 needcommit.md
 
+# ---- 排障探针 / 抓包产物（含本机账号、真实 MAC 等本机数据，严禁入库）----
+tools/_ssltest/
+tools/_*.js
+tools/_*.bin
+tools/_*.json
+tools/_*.txt
+tools/_*.bat
+tools/utf8__*
+
 # git 自身
 .gitignore

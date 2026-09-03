@@ -189,6 +189,7 @@ struct AuthConfig {
     QString  dnsServer;         // 主 DNS 地址
     QString  hostname;          // 本机主机名
     AuthMode mode = AuthMode::Wired;   // 认证方式（有线 802.1X / 无线 Portal）
+    bool     debug = false;            // 调试开关：Portal 请求/响应级调试日志（密码脱敏）
     uint8_t  localMac[6] = {};
     uint8_t  localIp[4]  = {};
 };

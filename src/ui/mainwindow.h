@@ -58,6 +58,17 @@ private:
     // 自动连接：登录早期网卡可能未就绪，未就绪时按间隔重试
     void autoConnectWithRetry(int attempt = 0);
 
+    // 启动时匿名查询一次在线状态（chkstatus，无需凭据）并在日志区提示当前连接状态。
+    // 三态判定：在线 / 明确离线 / 不可判定；不可判定（解析失败或网络异常）时重试，
+    // 重试仍不可判定则如实提示"无法确认"，绝不当作"未连接"。
+    // 判定已在线且无线模式配置完整时，自动走一次连接流程（chkstatus 会立即判已
+    // 在线并进入已连接态），使右上角状态指示器与实际一致。
+    void checkStartupConnection(int attempt = 0);
+
+    // 周期在线探测（仅"未连接 + 无线模式"时运行）：网页端登录后应用无法被推送，
+    // 靠 20s 一次的匿名 chkstatus 感知，发现已在线即接入状态机点亮"已连接"
+    void probeOnlinePeriodic();
+
     void applyStateUI(AppConnectionState state);
 
     // 自绘状态指示器（断开=灰环 / 连接中=旋转动画 / 已连接=绿色对勾）
@@ -102,6 +113,10 @@ private:
     QTimer* m_statusTimer = nullptr;
     int m_statusAngle = 0;
     AppConnectionState m_statusState = AppConnectionState::Disconnected;
+
+    // 周期在线探测（未连接时感知网页端登录）
+    QTimer* m_onlineProbeTimer = nullptr;
+    bool    m_probeInFlight = false;
 
     QSystemTrayIcon* m_trayIcon;
     QMenu*           m_trayMenu;

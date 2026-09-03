@@ -191,30 +191,46 @@ constexpr const char* DEFAULT_DNS = "202.38.193.33";
 // 六·二、无线 Portal（DrCOM eportal）认证常量 — s.scut.edu.cn
 // ============================================================================
 
-// eportal 认证 API 端口：login/logout 走 801，且为纯 HTTP（无 TLS）。
-// 实测 s.scut.edu.cn:801 用 TLS 握手会被服务器拒绝（SEC_E_INVALID_TOKEN），
-// 443 仅服务 / 首页、/drcom/chkstatus 与 /drcom/logout；
-// login/logout 的 scheme 见 portal_protocol.cpp（http）。
-constexpr uint16_t PORTAL_LOGIN_PORT = 801;
+// eportal 认证 API 端口：login/loadConfig 走 HTTPS 802（loadConfig 下发
+// enable_https=1 + ep_https_port=802，浏览器登录页实测即为 https://host:802；
+// 证书为受信链，无需忽略校验）。801 仅提供纯 HTTP（旧部署形态，新门户不通过）。
+// 注意：注销【不走】802 —— 必须是 443 的 /drcom/logout（门户页「注销」按钮
+// 实际调用的内核接口）。802 的 /eportal/portal/logout 会假报 "Radius注销成功！"
+// 但会话并未拆除。详见 portal_protocol.cpp 文件头。
+// 443 服务 / 首页、/drcom/chkstatus 与 /drcom/logout。
+constexpr uint16_t PORTAL_LOGIN_PORT = 802;
 // HTTP 请求超时 (ms)
 constexpr int PORTAL_REQUEST_TIMEOUT = 8000;
 // 会话整体超时 (ms)：chkstatus+login 整条登录链路的最长时限，
 // 超时按暂时性失败进入既有自动重连排程（防网络卡死时无限等待）
 constexpr int PORTAL_SESSION_TIMEOUT = 30000;
-// 在线状态检测周期 (ms) — SCUT Portal 策略为 15 分钟无流量下线，周期检测 + 自动
-// 重登可保持长期在线；周期内正常请求不产生任何日志
-constexpr int PORTAL_KEEPALIVE_INTERVAL = 60 * 1000;
+// 在线状态检测周期 (ms) — Portal 会话由服务器维护；SCUT 策略为 15 分钟无流量
+// 下线、且支持网页侧随时注销，20s 轮询可及时感知掉线/网页注销并更新状态或重登。
+// 每轮仅一个几百字节的 chkstatus 请求，流量开销可忽略。
+constexpr int PORTAL_KEEPALIVE_INTERVAL = 20 * 1000;
 // 保活检测失败时的退避上限 (ms)：服务器短暂不可达时逐次翻倍（60s→…→10min），
 // 避免网络抖动期间每 60s 打一个无效请求；恢复后复位到正常周期
 constexpr int PORTAL_KEEPALIVE_MAX_INTERVAL = 10 * 60 * 1000;
-// eportal JS 版本（SCUT 部署为 3.x）
-constexpr const char* PORTAL_JS_VERSION = "3.3.2";
+// eportal JS 版本（SCUT 新版门户 loadConfig 下发 4.1.3 + enable_new_drcom_srv=1）
+constexpr const char* PORTAL_JS_VERSION = "4.1.3";
+// wlan_user_mac / 账号形态：浏览器实测登录请求使用固定 000000000000（不携带
+// 终端真实 MAC），账号为纯学号（无 ",0," 设备前缀、无 "@wifi" 账号后缀）——
+// 旧 DrCOM 形态的 ",0," 前缀与新门户不兼容，切勿恢复
+constexpr const char* PORTAL_WLAN_USER_MAC = "000000000000";
+// 注销（mac/unbind 解绑终端）接口的账号需带完整后缀（实测 isp_unbind_suffix=0
+// 保留原样后缀），登录请求则用纯学号 —— 二者账号形态不同，勿混用
+constexpr const char* PORTAL_ACCOUNT_SUFFIX = "@wifi";
+// wlan_ac_ip：浏览器实测为 172.18.50.11（宿舍区 AC）。按区域可能不同，暂以
+// 默认值提供，后续可做成配置项
+constexpr const char* PORTAL_WLAN_AC_IP = "172.18.50.11";
+// program_index / page_index：loadConfig 按区域下发（宿舍区正式页面），浏览器
+// 登录请求必带；应用启动后优先从 loadConfig 动态获取，失败回退以下出厂值
+constexpr const char* PORTAL_DEFAULT_PROGRAM_INDEX = "aGPKgC1754462770";
+constexpr const char* PORTAL_DEFAULT_PAGE_INDEX    = "OYOGQG1754463397";
 // 伪装浏览器 UA（eportal 服务端会校验 User-Agent）
 constexpr const char* PORTAL_USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
-// wlan_user_mac 固定值（服务端不校验）
-constexpr const char* PORTAL_WLAN_USER_MAC = "000000000000";
 
 // ============================================================================
 // 七、UI / 应用常量

@@ -4,9 +4,13 @@
 #include "core/connection_builder.h"
 #include "config/config_manager.h"
 #include "network/network.h"
+#include "portal/portal_protocol.h"
 #include "log/log_manager.h"
 #include <QMessageBox>
 #include <QNetworkInterface>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QSslError>
 #include <QDateTime>
 #include <QTimer>
 #include <QApplication>
@@ -23,6 +27,7 @@
 #include <QRunnable>
 #include <QShortcut>
 #include <QSettings>
+#include <QRandomGenerator>
 // 系统唤醒事件（WM_POWERBROADCAST）：须在 Qt 头之后包含 windows.h
 #include <windows.h>
 
@@ -205,6 +210,16 @@ MainWindow::MainWindow(QWidget* parent)
             autoConnectWithRetry();
         });
     }
+
+    // 启动即查询一次当前连接状态（匿名 chkstatus，仅提示不自动登录）
+    QTimer::singleShot(0, this, [this]() { checkStartupConnection(); });
+
+    // 周期在线探测：感知网页端登录（无推送机制，未连接时轮询 chkstatus）
+    m_onlineProbeTimer = new QTimer(this);
+    m_onlineProbeTimer->setInterval(PORTAL_KEEPALIVE_INTERVAL);
+    connect(m_onlineProbeTimer, &QTimer::timeout,
+            this, &MainWindow::probeOnlinePeriodic);
+    m_onlineProbeTimer->start();
 
     applyStateUI(AppConnectionState::Disconnected);
 }
@@ -452,6 +467,7 @@ void MainWindow::loadConfig()
     ui->checkAutoSetNetwork->setChecked(cfg.autoSetNetwork);
     ui->checkAutoStart->setChecked(cfg.autoStart);
     ui->checkAutoConnect->setChecked(cfg.autoConnect);
+    ui->checkDebug->setChecked(cfg.debug);
 
     // 记录加载时的自启动状态，作为后续"是否变化"的比较基准。
     // 启动时恢复勾选状态不应重新同步系统任务（避免误删/误建）。
@@ -489,6 +505,7 @@ AppConfig MainWindow::collectCurrentCfg()
     cfg.autoSetNetwork = ui->checkAutoSetNetwork->isChecked();
     cfg.autoStart      = ui->checkAutoStart->isChecked();
     cfg.autoConnect    = ui->checkAutoConnect->isChecked();
+    cfg.debug          = ui->checkDebug->isChecked();
     return cfg;
 }
 
@@ -615,6 +632,118 @@ void MainWindow::autoConnectWithRetry(int attempt)
     // 这类错误重试无意义，交由用户修正，不再自动重试。
     m_autoConnectPending = false;
     on_btnConnect_clicked();
+}
+
+void MainWindow::checkStartupConnection(int attempt)
+{
+    // 匿名在线状态查询：chkstatus 无需凭据，仅用于启动时提示当前连接状态，
+    // 不触发登录、不改变状态机（真正的认证走 on_btnConnect_clicked / 自动连接）。
+    // 三态判定：在线 → 已连接；明确解析出离线 → 未连接；其它（网络异常/响应
+    // 不可解析/重定向到门户页等现场常见情况）→ 重试，仍不可判定则如实提示
+    // "无法确认"，绝不把"不可判定"误报成"未连接"。
+    const QString host = ui->editHost->text().trimmed();
+    if (host.isEmpty())
+        return;
+
+    auto* nam = new QNetworkAccessManager(this);
+    QNetworkRequest req(PortalProtocol::buildChkstatusUrl(
+        host, QRandomGenerator::global()->bounded(100000, 999999)));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QLatin1String(PORTAL_USER_AGENT));
+    req.setRawHeader("Referer", QStringLiteral("https://%1/").arg(host).toUtf8());
+    req.setTransferTimeout(PORTAL_REQUEST_TIMEOUT);
+
+    QNetworkReply* reply = nam->get(req);
+    connect(reply, &QNetworkReply::sslErrors, reply,
+            [reply](const QList<QSslError>&) { reply->ignoreSslErrors(); });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, attempt]() {
+        bool concluded = false;
+        bool online = false;
+        QString ip;
+        if (reply->error() == QNetworkReply::NoError) {
+            const PortalProtocol::PortalResponse r =
+                PortalProtocol::parseJsonp(reply->readAll(), QStringLiteral("dr1002"));
+            if (r.valid) {                      // 解析成功 → 结论可用
+                concluded = true;
+                online = r.result == 1;
+                ip = r.v46ip;
+            }
+        }
+        reply->deleteLater();
+        if (!concluded) {
+            // 解析失败/网络异常：chkstatus 端点存在瞬时抖动（与 PortalProcess 里
+            // "无法解析在线状态响应"同源），按 1s→4s 递增重试最多 5 次覆盖抖动
+            // 窗口；仍失败才如实提示，绝不把"不可判定"误报成"未连接"
+            if (attempt < 5) {
+                QTimer::singleShot(qMin(1000 * (attempt + 1), 4000), this,
+                                   [this, attempt]() {
+                    checkStartupConnection(attempt + 1);
+                });
+                return;
+            }
+            onLogMessage(QStringLiteral("启动检测：暂时无法确认在线状态（门户响应异常）；"
+                                        "如需连接请点击\"连接\""), 1);
+            return;
+        }
+        onLogMessage(online
+                     ? QStringLiteral("启动检测：当前已连接（%1）").arg(ip)
+                     : QStringLiteral("启动检测：当前未连接"), 0);
+        if (online && m_sessionManager->state() == AppConnectionState::Disconnected
+            && !m_autoConnectPending && isWirelessMode()
+            && !ui->editUsername->text().trimmed().isEmpty()) {
+            // 指示器与状态机对齐：探测已在线 → 直接接入状态机。其 chkstatus 会立即
+            // 判「已在线」进入已连接态（不发登录请求、不校验/不使用密码——未保存
+            // 密码的用户也能正确点亮指示器）；若此刻会话恰好掉线才需要补登。
+            // 绕过 on_btnConnect_clicked 的 ConnectionBuilder 空凭证校验（见上）。
+            m_sessionManager->startConnection(getCurrentConfig());
+        }
+    });
+}
+
+void MainWindow::probeOnlinePeriodic()
+{
+    // 仅"未连接 + 无线模式"时探测：已接入的会话由 PortalProcess 的保活负责状态；
+    // 网页端登录后应用无法被推送，靠这里周期感知并点亮"已连接"
+    if (m_isQuitting || m_probeInFlight || !isWirelessMode()
+        || m_sessionManager->state() != AppConnectionState::Disconnected)
+        return;
+
+    const QString host = ui->editHost->text().trimmed();
+    if (host.isEmpty())
+        return;
+
+    m_probeInFlight = true;
+    auto* nam = new QNetworkAccessManager(this);
+    QNetworkRequest req(PortalProtocol::buildChkstatusUrl(
+        host, QRandomGenerator::global()->bounded(100000, 999999)));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QLatin1String(PORTAL_USER_AGENT));
+    req.setRawHeader("Referer", QStringLiteral("https://%1/").arg(host).toUtf8());
+    req.setTransferTimeout(PORTAL_REQUEST_TIMEOUT);
+
+    QNetworkReply* reply = nam->get(req);
+    connect(reply, &QNetworkReply::sslErrors, reply,
+            [reply](const QList<QSslError>&) { reply->ignoreSslErrors(); });
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        m_probeInFlight = false;
+        bool online = false;
+        QString ip;
+        if (reply->error() == QNetworkReply::NoError) {
+            const PortalProtocol::PortalResponse r =
+                PortalProtocol::parseJsonp(reply->readAll(), QStringLiteral("dr1002"));
+            if (r.valid) {
+                online = r.result == 1;
+                ip = r.v46ip;
+            }
+        }
+        reply->deleteLater();
+
+        // 状态机当前仍"未连接"（连接流程可能刚被用户手动发起）且探测到在线 → 接入
+        if (online
+            && m_sessionManager->state() == AppConnectionState::Disconnected) {
+            onLogMessage(QStringLiteral("检测到网页端已登录（%1），状态已更新为已连接")
+                             .arg(ip), 0);
+            m_sessionManager->startConnection(getCurrentConfig());
+        }
+    });
 }
 
 void MainWindow::on_btnDisconnect_clicked()

@@ -674,35 +674,64 @@ void TestPackets::portal_buildUrls()
     QCOMPARE(chk.toString(QUrl::FullyEncoded),
              QStringLiteral("https://s.scut.edu.cn/drcom/chkstatus?callback=dr1002&v=12345"));
 
-    // logout：HTTP 801 + /eportal/?c=ACSetting&a=Logout（门户配置 authlogoutpath）
-    const auto out = PortalProtocol::buildLogoutUrl(QStringLiteral("s.scut.edu.cn"), 7);
+    // logout：HTTPS 802 + /eportal/portal/mac/unbind（注销并解绑本机 MAC ——
+    // 实测三端点中唯一能真下线且不被自动恢复的路径）。账号补全 @wifi 后缀、
+    // MAC 转大写、IP 转 32 位整数（180596101 = 10.195.173.133）
+    const auto out = PortalProtocol::buildLogoutUrl(QStringLiteral("s.scut.edu.cn"),
+                                                    QStringLiteral("2026xxxx"),
+                                                    QStringLiteral("10.195.173.133"),
+                                                    QStringLiteral("d0577edf2618"), 7);
     QCOMPARE(out.toString(QUrl::FullyEncoded),
-             QStringLiteral("http://s.scut.edu.cn:801/eportal/?c=ACSetting&a=Logout&ver=1.0&callback=dr1006&jsVersion=3.3.2&v=7&lang=zh"));
+             QStringLiteral("https://s.scut.edu.cn:802/eportal/portal/mac/unbind?callback=dr1006&user_account=2026xxxx%40wifi&wlan_user_mac=D0577EDF2618&wlan_user_ip=180596101&unbind_type=1&jsVersion=4.1.3&lang=zh&v=7"));
+    QCOMPARE(out.port(), 802);
 
-    // login：HTTP 801（纯 HTTP，非 TLS）+ /eportal/，user_account 带 ",0," 前缀并整体 URL 编码，
-    // 密码中的 URL 保留字符（& = @）必须被编码（与浏览器 encodeURIComponent 行为一致）
+    // 账号已含 @wifi 后缀 → 不重复追加
+    const auto out2 = PortalProtocol::buildLogoutUrl(QStringLiteral("s.scut.edu.cn"),
+                                                     QStringLiteral("2026xxxx@wifi"),
+                                                     QStringLiteral("10.0.0.2"),
+                                                     QStringLiteral("001122334455"), 8);
+    QVERIFY(out2.query(QUrl::FullyEncoded)
+                .contains(QStringLiteral("user_account=2026xxxx%40wifi")));
+
+    // login：HTTPS 802（受信 TLS）+ 新版接口 /eportal/portal/login。
+    // 参数形态实测自浏览器成功登录请求：纯学号（无 ",0," 前缀 / 无 @wifi 后缀）、
+    // wlan_user_mac 恒 000000000000、wlan_ac_ip 为区域 AC、必带 mac_type=0 与
+    // program_index/page_index。密码中的 URL 保留字符（& = @）必须被编码
     const auto url = PortalProtocol::buildLoginUrl(QStringLiteral("s.scut.edu.cn"),
                                                    QStringLiteral("2026xxxx"),
                                                    QStringLiteral("p@ss&word=1"),
-                                                   QStringLiteral("172.18.1.2"), 99);
-    QCOMPARE(url.scheme(), QStringLiteral("http"));   // 801 为纯 HTTP（实测非 TLS）
+                                                   QStringLiteral("172.18.1.2"),
+                                                   QStringLiteral("aGPKgC1754462770"),
+                                                   QStringLiteral("OYOGQG1754463397"), 99);
+    QCOMPARE(url.scheme(), QStringLiteral("https"));   // 802 为受信 TLS（实测非自签）
     QCOMPARE(url.host(), QStringLiteral("s.scut.edu.cn"));
-    QCOMPARE(url.port(), 801);
-    QCOMPARE(url.path(), QStringLiteral("/eportal/"));
+    QCOMPARE(url.port(), 802);
+    QCOMPARE(url.path(), QStringLiteral("/eportal/portal/login"));
     const QString q = url.query(QUrl::FullyEncoded);
-    QVERIFY(q.contains(QStringLiteral("c=Portal&a=login&callback=dr1003&login_method=1")));
-    QVERIFY(q.contains(QStringLiteral("user_account=%2C0%2C2026xxxx")));
+    QVERIFY(q.contains(QStringLiteral("callback=dr1003&login_method=1")));
+    QVERIFY(!q.contains(QStringLiteral("c=Portal&a=login")));   // 旧接口已废弃
+    QVERIFY(q.contains(QStringLiteral("user_account=2026xxxx")));   // 纯学号，无 ",0," 前缀
+    QVERIFY(!q.contains(QStringLiteral("user_account=%2C0%2C")));   // 无设备类型前缀
+    QVERIFY(!q.contains(QStringLiteral("@wifi")));                 // 无账号后缀
     QVERIFY(q.contains(QStringLiteral("user_password=p%40ss%26word%3D1")));
     QVERIFY(q.contains(QStringLiteral("wlan_user_ip=172.18.1.2")));
-    QVERIFY(q.contains(QStringLiteral("wlan_user_ipv6=&wlan_user_mac=000000000000")));
-    QVERIFY(q.contains(QStringLiteral("wlan_ac_ip=&wlan_ac_name=&jsVersion=3.3.2&v=99")));
+    QVERIFY(q.contains(QStringLiteral("wlan_user_ipv6=&wlan_user_mac=000000000000")));  // 固定占位 MAC
+    QVERIFY(q.contains(QStringLiteral("wlan_ac_ip=172.18.50.11")));   // 区域 AC（浏览器实测值）
+    QVERIFY(q.contains(QStringLiteral("wlan_ac_name=&jsVersion=4.1.3")));
+    QVERIFY(q.contains(QStringLiteral("terminal_type=1&lang=zh-cn&mac_type=0")));
+    QVERIFY(q.contains(QStringLiteral("program_index=aGPKgC1754462770")));
+    QVERIFY(q.contains(QStringLiteral("page_index=OYOGQG1754463397")));
+    QVERIFY(q.contains(QStringLiteral("v=99&lang=zh")));
 
-    // 中文密码（UTF-8 编码后百分号转义）
+    // 中文密码（UTF-8 编码后百分号转义）与页面参数编码
     const auto url2 = PortalProtocol::buildLoginUrl(QStringLiteral("s.scut.edu.cn"),
                                                     QStringLiteral("u"), QStringLiteral("密码"),
-                                                    QStringLiteral("10.0.0.1"), 1);
+                                                    QStringLiteral("10.0.0.1"),
+                                                    QStringLiteral("pi"), QStringLiteral("pa"), 1);
     QVERIFY(url2.query(QUrl::FullyEncoded)
                 .contains(QStringLiteral("user_password=%E5%AF%86%E7%A0%81")));
+    QVERIFY(url2.query(QUrl::FullyEncoded)
+                .contains(QStringLiteral("program_index=pi&page_index=pa")));
 }
 
 void TestPackets::portal_parseJsonp()
@@ -722,6 +751,23 @@ void TestPackets::portal_parseJsonp()
     QVERIFY(r.valid);
     QCOMPARE(r.result, 0);
     QCOMPARE(r.msg, QStringLiteral("密码错误"));
+    QCOMPARE(r.retCode, 0);
+
+    // SCUT 部署形态：失败响应 msg 恒为无含义的 "512"，真实原因在 ret_code
+    // （数字形态）
+    r = PortalProtocol::parseJsonp(
+        QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"512\",\"ret_code\":8})"),
+        QStringLiteral("dr1003"));
+    QVERIFY(r.valid);
+    QCOMPARE(r.result, 0);
+    QCOMPARE(r.retCode, 8);
+
+    // ret_code 字符串形态的部署兼容
+    r = PortalProtocol::parseJsonp(
+        QByteArrayLiteral("dr1003({\"result\":\"0\",\"msg\":\"512\",\"ret_code\":\"12\"})"),
+        QStringLiteral("dr1003"));
+    QVERIFY(r.valid);
+    QCOMPARE(r.retCode, 12);
 
     // chkstatus 已在线（dr1002 + v46ip；尾随分号容忍）
     r = PortalProtocol::parseJsonp(
@@ -730,6 +776,19 @@ void TestPackets::portal_parseJsonp()
     QVERIFY(r.valid);
     QCOMPARE(r.result, 1);
     QCOMPARE(r.v46ip, QStringLiteral("172.18.2.3"));
+
+    // 回归：chkstatus 响应 charset=gbk，字段（如 NID）含非 UTF-8 字节时，原生
+    // UTF-8 解析会整体失败 —— 必须按 Latin-1 重解释兜底，result 仍可正确读出。
+    // \xE8\x8C\xBD 为不完整的 UTF-8 序列（非法字节），直接 fromJson 必然失败
+    {
+        QByteArray gbkBody = QByteArrayLiteral("dr1002({\"result\":1,\"v46ip\":\"172.18.2.3\",\"NID\":\"");
+        gbkBody += QByteArray("\xE8\x8C\xBD", 3);   // 非法 UTF-8 字节
+        gbkBody += QByteArrayLiteral("\"})");
+        r = PortalProtocol::parseJsonp(gbkBody, QStringLiteral("dr1002"));
+        QVERIFY(r.valid);
+        QCOMPARE(r.result, 1);
+        QCOMPARE(r.v46ip, QStringLiteral("172.18.2.3"));
+    }
 
     // result 为字符串形态的部署兼容
     r = PortalProtocol::parseJsonp(
@@ -1050,7 +1109,7 @@ class MockEportal : public QTcpServer {
     Q_OBJECT
 public:
     enum class ChkStatus { Offline, Online };
-    enum class LoginResult { Success, AlreadyOnline, PermanentFail, RetryableFail };
+    enum class LoginResult { Success, AlreadyOnline, PermanentFail, RetryableFail, ScutCodeFail, RetCode2 };
 
     bool start() { return listen(QHostAddress::LocalHost, 0); }
 
@@ -1089,6 +1148,8 @@ private:
             body = m_chk == ChkStatus::Online
                 ? QByteArrayLiteral("dr1002({\"result\":1,\"v46ip\":\"172.16.0.2\"})")
                 : QByteArrayLiteral("dr1002({\"result\":0,\"v46ip\":\"172.16.0.2\"})");
+        } else if (path.contains(QStringLiteral("/eportal/portal/page/loadConfig"))) {
+            body = QByteArrayLiteral("dr1004({\"code\":1,\"data\":{\"program_index\":\"aGPKgC1754462770\",\"page_index\":\"OYOGQG1754463397\"}})");
         } else if (path.startsWith(QStringLiteral("/eportal/"))) {
             ++m_loginRequests;
             switch (m_login) {
@@ -1096,6 +1157,10 @@ private:
             case LoginResult::AlreadyOnline: body = QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"该账号已经在线\"})"); break;
             case LoginResult::PermanentFail: body = QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"密码错误\"})"); break;
             case LoginResult::RetryableFail: body = QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"暂时无法认证\"})"); break;
+            // SCUT 实测部署形态：任意失败 msg 恒为 "512"，真实原因在 ret_code
+            case LoginResult::ScutCodeFail: body = QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"512\",\"ret_code\":8})"); break;
+            // SCUT 实测：登录被拒 ret_code=2 —— 账号已被 AC 无感知认证置为在线
+            case LoginResult::RetCode2: body = QByteArrayLiteral("dr1003({\"result\":0,\"msg\":\"512\",\"ret_code\":2})"); break;
             }
         } else if (path.contains(QStringLiteral("/drcom/logout"))) {
             ++m_logoutRequests;
@@ -1125,11 +1190,12 @@ private:
 class TestablePortal : public PortalProcess {
     Q_OBJECT
 public:
-    void setEndpoints(QUrl chk, QUrl login, QUrl logout)
+    void setEndpoints(QUrl chk, QUrl login, QUrl logout, QUrl loadConfig = QUrl())
     {
         m_chk = std::move(chk);
         m_login = std::move(login);
         m_logout = std::move(logout);
+        m_loadConfig = std::move(loadConfig);
     }
     void setSessionTimeout(int ms) { m_timeoutMs = ms; }
 
@@ -1137,12 +1203,14 @@ protected:
     QUrl makeChkstatusUrl() const override { return m_chk; }
     QUrl makeLoginUrl() const override { return m_login; }
     QUrl makeLogoutUrl() const override { return m_logout; }
+    QUrl makeLoadConfigUrl() const override { return m_loadConfig; }
     int sessionTimeoutMs() const override { return m_timeoutMs; }
 
 private:
     QUrl m_chk;
     QUrl m_login;
     QUrl m_logout;
+    QUrl m_loadConfig;   // 为空时 beginLogin 不会先走 loadConfig（走默认值）
     int m_timeoutMs = 600;   // 测试默认缩短会话超时，避免等待真实 30s
 };
 
@@ -1152,10 +1220,12 @@ struct TestPortalHarness {
     TestablePortal portal;
     QSignalSpy stateSpy;
     QSignalSpy successSpy;
+    QSignalSpy logSpy;      // PortalProcess::logMessage(QString, int)
 
     TestPortalHarness()
         : stateSpy(&portal, &PortalProcess::stateChanged)
         , successSpy(&portal, &PortalProcess::portalSuccess)
+        , logSpy(&portal, &PortalProcess::logMessage)
     {
         server.start();   // 先绑定随机端口，port() 才有效
         AuthConfig cfg;
@@ -1167,7 +1237,8 @@ struct TestPortalHarness {
         portal.setEndpoints(
             QUrl(QStringLiteral("http://127.0.0.1:%1/drcom/chkstatus?callback=dr1002").arg(server.serverPort())),
             QUrl(QStringLiteral("http://127.0.0.1:%1/eportal/").arg(server.serverPort())),
-            QUrl(QStringLiteral("http://127.0.0.1:%1/drcom/logout?callback=dr1006").arg(server.serverPort())));
+            QUrl(QStringLiteral("http://127.0.0.1:%1/drcom/logout?callback=dr1006").arg(server.serverPort())),
+            QUrl(QStringLiteral("http://127.0.0.1:%1/eportal/portal/page/loadConfig?callback=dr1004").arg(server.serverPort())));
     }
 };
 
@@ -1177,6 +1248,17 @@ bool lastStateIs(const QSignalSpy& spy, AuthState expected)
     if (spy.isEmpty())
         return false;
     return spy.last().at(0).value<AuthState>() == expected;
+}
+
+// 在已捕获的 logMessage 中查找包含指定子串的条目；找到返回其日志级别，否则 -1
+// （logMessage 签名：void logMessage(const QString& message, int level)）
+int logLevelOf(const QSignalSpy& spy, const QString& needle)
+{
+    for (const QList<QVariant>& args : spy) {
+        if (args.at(0).toString().contains(needle))
+            return args.at(1).toInt();
+    }
+    return -1;
 }
 
 } // namespace
@@ -1190,7 +1272,11 @@ private slots:
     void alreadyOnlineFromLogin();
     void permanentFailureStopsRetry();
     void retryableFailure();
+    void scutCodeFailSurfacesRetCode();
+    void retCode2RecoversViaRecheck();
     void sessionTimeout();
+    void logoutConfirmedOffline();
+    void logoutStillOnlineIsNotReportedAsSuccess();
 };
 
 void PortalIntegration::loginSuccessFlow()
@@ -1262,6 +1348,37 @@ void PortalIntegration::retryableFailure()
     QVERIFY(h.stateSpy.last().at(2).toBool());   // retryable == true（可自动重试）
 }
 
+void PortalIntegration::scutCodeFailSurfacesRetCode()
+{
+    // SCUT 部署形态：失败响应 msg="512"（无含义）+ ret_code=8（真实错误码）。
+    // 错误码必须透传到状态消息，且保持 retryable（可自动重试）。
+    TestPortalHarness h;
+    QVERIFY(h.server.isListening());
+    h.server.setChkStatus(MockEportal::ChkStatus::Offline);
+    h.server.setLoginResult(MockEportal::LoginResult::ScutCodeFail);
+
+    h.portal.start();
+    QTRY_VERIFY_WITH_TIMEOUT(lastStateIs(h.stateSpy, AuthState::Failed), 3000);
+    QVERIFY(h.stateSpy.last().at(2).toBool());                       // retryable == true
+    QVERIFY(h.stateSpy.last().at(1).toString().contains("8"));       // 透传真实错误码
+    QVERIFY(!h.stateSpy.last().at(1).toString().contains("512"));    // 过滤无含义的 msg
+}
+
+void PortalIntegration::retCode2RecoversViaRecheck()
+{
+    // SCUT 实测：登录被拒 ret_code=2（账号已被 AC 无感知认证置为在线）。
+    // 应用应回查 chkstatus，确认在线后按成功收尾（而非周期重试空转）。
+    TestPortalHarness h;
+    QVERIFY(h.server.isListening());
+    h.server.setChkStatus(MockEportal::ChkStatus::Online);   // 回查发现已在在线
+    h.server.setLoginResult(MockEportal::LoginResult::RetCode2);
+
+    h.portal.start();
+    QVERIFY(h.successSpy.wait(3000));
+    QCOMPARE(h.successSpy.count(), 1);
+    QVERIFY(lastStateIs(h.stateSpy, AuthState::Authenticated));
+}
+
 void PortalIntegration::sessionTimeout()
 {
     TestPortalHarness h;
@@ -1272,6 +1389,45 @@ void PortalIntegration::sessionTimeout()
     h.portal.start();
     QTRY_VERIFY_WITH_TIMEOUT(lastStateIs(h.stateSpy, AuthState::Failed), 4000);
     QVERIFY(h.stateSpy.last().at(2).toBool());   // retryable == true（可自动重试）
+}
+
+void PortalIntegration::logoutConfirmedOffline()
+{
+    // 正常路径：注销接口回执成功 + 回查确认离线 → 如实报告已离线
+    TestPortalHarness h;
+    h.server.setChkStatus(MockEportal::ChkStatus::Offline);
+    h.server.setLoginResult(MockEportal::LoginResult::Success);
+
+    h.portal.start();
+    QVERIFY(h.successSpy.wait(3000));
+
+    h.portal.stop();
+    QTRY_VERIFY_WITH_TIMEOUT(h.server.logoutRequests() == 1, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        logLevelOf(h.logSpy, QStringLiteral("Portal 会话已注销，本机已离线")) == 0, 3000);
+}
+
+void PortalIntegration::logoutStillOnlineIsNotReportedAsSuccess()
+{
+    // 回归用例（线上真实故障）：802 的 /eportal/portal/logout 会返回
+    // result=1 "Radius注销成功！"，但 chkstatus 仍显示本机在线。
+    // 结论必须以 chkstatus 回查为准 —— 绝不能只凭服务端回执就宣称"已注销"。
+    TestPortalHarness h;
+    h.server.setChkStatus(MockEportal::ChkStatus::Offline);
+    h.server.setLoginResult(MockEportal::LoginResult::Success);
+
+    h.portal.start();
+    QVERIFY(h.successSpy.wait(3000));
+
+    // 注销后回查仍在线（模拟 Radius 侧注销未拆除 AC 会话）
+    h.server.setChkStatus(MockEportal::ChkStatus::Online);
+    h.portal.stop();
+    QTRY_VERIFY_WITH_TIMEOUT(h.server.logoutRequests() == 1, 3000);
+
+    // 必须上报为错误级（level 2），且日志中不得出现"已注销"。
+    // 注销结果回查存在 1s×5 的耐心重查（AC 拆除会话有秒级延迟），放宽容差
+    QTRY_VERIFY_WITH_TIMEOUT(logLevelOf(h.logSpy, QStringLiteral("注销未生效")) == 2, 9000);
+    QCOMPARE(logLevelOf(h.logSpy, QStringLiteral("已注销")), -1);
 }
 
 int main(int argc, char* argv[])

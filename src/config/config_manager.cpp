@@ -38,6 +38,7 @@ AppConfig load(const QString& configPath)
     cfg.autoSetNetwork = settings.value("autoSetNetwork", false).toBool();
     cfg.autoStart      = settings.value("autoStart", false).toBool();
     cfg.autoConnect    = settings.value("autoConnect", false).toBool();
+    cfg.debug          = settings.value("debug", false).toBool();
 
     // 密码：优先按 DPAPI 密文解密；解密失败（旧版本 Base64 明文 / 数据损坏 /
     // 非当前用户加密）则回退为直接 Base64 解码，实现旧配置无感迁移。
@@ -71,6 +72,7 @@ void save(const QString& configPath, const AppConfig& cfg)
     settings.setValue("autoSetNetwork", cfg.autoSetNetwork);
     settings.setValue("autoStart",      cfg.autoStart);
     settings.setValue("autoConnect",    cfg.autoConnect);
+    settings.setValue("debug",          cfg.debug);
 
     if (cfg.savePassword)
         settings.setValue("password", Credential::encryptPassword(cfg.password));
@@ -87,6 +89,7 @@ AuthConfig toAuthConfig(const AppConfig& cfg)
     config.dnsServer     = cfg.dns;
     config.interfaceName = cfg.interfaceName;
     config.mode          = cfg.wireless ? AuthMode::Wireless : AuthMode::Wired;
+    config.debug         = cfg.debug;
 
     // MAC
     QString macStr = ByteUtils::normalizeMac(cfg.manualMac);

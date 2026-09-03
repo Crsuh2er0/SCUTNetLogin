@@ -171,7 +171,7 @@
              </item>
              <item row="1" column="1">
               <widget class="QLineEdit" name="editUsername">
-               <property name="placeholderText"><string>校园网账号</string></property>
+               <property name="placeholderText"><string>校园网账号（无线模式自动补全 @wifi 后缀）</string></property>
               </widget>
              </item>
              <item row="2" column="0">
@@ -478,6 +478,12 @@
                <item>
                 <widget class="QCheckBox" name="checkAutoConnect">
                  <property name="text"><string>启动后自动连接</string></property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QCheckBox" name="checkDebug">
+                 <property name="text"><string>调试日志</string></property>
+                 <property name="toolTip"><string>启用后输出 Portal 请求/响应级调试日志（密码脱敏），仅在排障时开启</string></property>
                 </widget>
                </item>
               </layout>

@@ -1,5 +1,6 @@
 #include "portal/portal_protocol.h"
 #include "core/constants.h"
+#include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
 
@@ -8,18 +9,29 @@ namespace PortalProtocol {
 // ---------------------------------------------------------------------------
 // URL 构造
 //
-// query 中各参数显式用 QUrl::toPercentEncoding 编码（逗号 / & / = / @ 等
-// 在密码中常见），保证与浏览器端 eportal JS 的 encodeURIComponent 行为一致；
-// 固定参数（c=Portal 等）均为安全字符，直接拼接。
-//
-// 端口约定（实测自 s.scut.edu.cn）：
+// 端口/scheme（实测自 s.scut.edu.cn + 浏览器成功登录抓包）：
 //   - chkstatus : HTTPS 443  /drcom/chkstatus
-//   - login     : HTTP  801  /eportal/?c=Portal&a=login  （801 仅纯 HTTP，
-//                 门户配置 authloginpath/authloginport 亦为 801，无 TLS）
-//   - logout    : HTTP  801  /eportal/?c=ACSetting&a=Logout&ver=1.0
-//                 （门户配置 authlogoutpath；443 /drcom/logout 亦可但返回
-//                 的是 html 而非 JSONP，统一走 801 保证可解析）
-// 故 login/logout 的 scheme 为 http 而非 https。
+//   - loadConfig: HTTPS 802  /eportal/portal/page/loadConfig（获取 program_index
+//                 /page_index；enable_https=1 + ep_https_port=802）
+//   - login     : HTTPS 802  /eportal/portal/login
+//   - logout    : HTTPS 802  /eportal/portal/mac/unbind（注销并解绑本机 MAC）
+// 802 为受信 TLS（证书链有效，无需忽略校验）；801 纯 HTTP 为旧部署形态，新门户
+// 下 login 一律返回失败（实测 result=0/msg=512），浏览器始终走 802。
+//
+// 【注销必须用 802 的 mac/unbind，前两个候选均已实测否定】
+// 门户页「注销(Logout)」按钮（a40.js wc()）：un_bind_mac=1 且 register_mode∈{1,4}
+// → user.unbind_mac("","",1) → url = page.portal_api + 'mac/unbind'（unbind_type=1，
+// 注销并解绑当前终端 MAC）。实测三种注销行为：
+//   - 443  /drcom/logout          → "Logout Error(no webmode)"，不生效
+//   - 802  /eportal/portal/logout → 返回 result=1 "Radius注销成功！"，但 AC 会话
+//                                   未拆除，chkstatus 随后仍显示在线（假成功）
+//   - 802  /eportal/portal/mac/unbind → "解绑终端MAC成功！"，chkstatus 归 0 且
+//                                   稳定离线、不再被自动重新注册（唯一正确路径）
+// 参数：user_account 带 @wifi 完整后缀（isp_unbind_suffix=0 保留后缀）；
+// wlan_user_mac 为本机真实 MAC 大写；wlan_user_ip 为 32 位整数（0x0AC3AD85
+// 型，等价门户页 util.ipToParseInt）；unbind_type=1。
+// query 中非安全字符一律 QUrl::toPercentEncoding 编码（与浏览器 encodeURIComponent
+// 一致）；次序按门户页抓包原样保留。
 // ---------------------------------------------------------------------------
 
 QUrl buildChkstatusUrl(const QString& host, int v)
@@ -33,43 +45,66 @@ QUrl buildChkstatusUrl(const QString& host, int v)
 }
 
 QUrl buildLoginUrl(const QString& host, const QString& username,
-                   const QString& password, const QString& userIp, int v)
+                   const QString& password, const QString& userIp,
+                   const QString& programIndex, const QString& pageIndex, int v)
 {
-    // DrCOM eportal 用户账号格式：",0,<学号>"。前缀 ",0," 为设备类型标记
-    //（0 = PC），缺失会被服务器拒绝（逆向自门户页 JS 的 fixed_account 逻辑）。
-    const QString userAccount = QStringLiteral(",0,") + username;
-
     QUrl url;
-    url.setScheme(QStringLiteral("http"));   // 801 为纯 HTTP（见注释）
+    url.setScheme(QStringLiteral("https"));   // 802 为受信 TLS（见注释）
     url.setHost(host);
     url.setPort(PORTAL_LOGIN_PORT);
-    url.setPath(QStringLiteral("/eportal/"));
-    url.setQuery(QStringLiteral(
-                     "c=Portal&a=login&callback=dr1003&login_method=1")
+    url.setPath(QStringLiteral("/eportal/portal/login"));
+    url.setQuery(QStringLiteral("callback=dr1003&login_method=1")
                  + QStringLiteral("&user_account=")
-                 + QString::fromUtf8(QUrl::toPercentEncoding(userAccount))
+                 + QString::fromUtf8(QUrl::toPercentEncoding(username))
                  + QStringLiteral("&user_password=")
                  + QString::fromUtf8(QUrl::toPercentEncoding(password))
                  + QStringLiteral("&wlan_user_ip=")
                  + QString::fromUtf8(QUrl::toPercentEncoding(userIp))
                  + QStringLiteral("&wlan_user_ipv6=&wlan_user_mac=")
                  + QLatin1String(PORTAL_WLAN_USER_MAC)
-                 + QStringLiteral("&wlan_ac_ip=&wlan_ac_name=&jsVersion=")
+                 + QStringLiteral("&wlan_ac_ip=")
+                 + QLatin1String(PORTAL_WLAN_AC_IP)
+                 + QStringLiteral("&wlan_ac_name=&jsVersion=")
                  + QLatin1String(PORTAL_JS_VERSION)
-                 + QStringLiteral("&v=%1").arg(v));
+                 + QStringLiteral("&terminal_type=1&lang=zh-cn&mac_type=0")
+                 + QStringLiteral("&program_index=")
+                 + QString::fromUtf8(QUrl::toPercentEncoding(programIndex))
+                 + QStringLiteral("&page_index=")
+                 + QString::fromUtf8(QUrl::toPercentEncoding(pageIndex))
+                 + QStringLiteral("&v=%1&lang=zh").arg(v));
     return url;
 }
 
-QUrl buildLogoutUrl(const QString& host, int v)
+QUrl buildLogoutUrl(const QString& host, const QString& username,
+                    const QString& userIp, const QString& userMac, int v)
 {
+    // 注销（解绑 MAC）账号需带 @wifi 完整后缀（登录用纯学号，二者不同）
+    const QString account = username.endsWith(QLatin1String(PORTAL_ACCOUNT_SUFFIX))
+                                ? username
+                                : username + QLatin1String(PORTAL_ACCOUNT_SUFFIX);
+
+    // wlan_user_ip：点分 → 32 位大端整数（与门户页 util.ipToParseInt 一致）
+    QString ipInt = QStringLiteral("0");
+    {
+        QHostAddress addr(userIp);
+        if (addr.protocol() == QAbstractSocket::IPv4Protocol)
+            ipInt = QString::number(addr.toIPv4Address());
+    }
+
     QUrl url;
-    url.setScheme(QStringLiteral("http"));   // 801 为纯 HTTP（见注释）
+    url.setScheme(QStringLiteral("https"));   // 802 为受信 TLS（见注释）
     url.setHost(host);
     url.setPort(PORTAL_LOGIN_PORT);
-    url.setPath(QStringLiteral("/eportal/"));
-    url.setQuery(QStringLiteral("c=ACSetting&a=Logout&ver=1.0")
-                 + QStringLiteral("&callback=dr1006&jsVersion=%1&v=%2&lang=zh")
-                     .arg(QLatin1String(PORTAL_JS_VERSION)).arg(v));
+    url.setPath(QStringLiteral("/eportal/portal/mac/unbind"));
+    url.setQuery(QStringLiteral("callback=dr1006&user_account=")
+                 + QString::fromUtf8(QUrl::toPercentEncoding(account))
+                 + QStringLiteral("&wlan_user_mac=")
+                 + QString::fromUtf8(QUrl::toPercentEncoding(userMac.toUpper()))
+                 + QStringLiteral("&wlan_user_ip=")
+                 + ipInt
+                 + QStringLiteral("&unbind_type=1&jsVersion=")
+                 + QLatin1String(PORTAL_JS_VERSION)
+                 + QStringLiteral("&lang=zh&v=%1").arg(v));
     return url;
 }
 
@@ -94,7 +129,14 @@ PortalResponse parseJsonp(const QByteArray& body, const QString& callback)
     if (json.isEmpty() || !json.startsWith('{'))
         return r;
 
-    const QJsonDocument doc = QJsonDocument::fromJson(json);
+    QJsonDocument doc = QJsonDocument::fromJson(json);
+    if (!doc.isObject()) {
+        // 门户响应头声明 charset=gbk，字段值可能含非 UTF-8 字节（如 chkstatus 的
+        // NID），Qt 的 fromJson 严格按 UTF-8 校验会整体解析失败。按 Latin-1 重新
+        // 解释后再转 UTF-8：ASCII 结构（键名/引号/括号）逐字节不变，仅受影响
+        // 字段的值字节被重映射，result/ret_code/v46ip 等 ASCII 字段不受影响。
+        doc = QJsonDocument::fromJson(QString::fromLatin1(json).toUtf8());
+    }
     if (!doc.isObject())
         return r;
 
@@ -104,6 +146,12 @@ PortalResponse parseJsonp(const QByteArray& body, const QString& callback)
     r.result = resultVal.isString() ? resultVal.toString().toInt()
                                     : static_cast<int>(resultVal.toDouble());
     r.msg   = obj.value(QStringLiteral("msg")).toString();
+    // 详细错误码（仅 login 失败响应携带）：SCUT 部署对任意登录失败 msg 恒为
+    // 无含义的 "512"，真实原因在 ret_code —— 必须保留并上抛，否则无法区分
+    // 凭证错误与暂时性错误
+    const QJsonValue retVal = obj.value(QStringLiteral("ret_code"));
+    r.retCode = retVal.isString() ? retVal.toString().toInt()
+                                  : static_cast<int>(retVal.toDouble());
     r.v46ip = obj.value(QStringLiteral("v46ip")).toString();
     r.valid = true;
     return r;
