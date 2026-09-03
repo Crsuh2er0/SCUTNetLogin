@@ -636,6 +636,7 @@ void SessionManager::onAutoWaitTick()
         if (m_reconnectTimer)
             m_reconnectTimer->stop();
         stopAutoWait();
+        m_activeBackend = ActiveBackend::WiredEap;   // 同步后端：isWifiUiLive/链路监视等依赖它
         emit logMessage(QStringLiteral("检测到有线网卡已接入，自动开始有线认证..."), 0);
         startWiredBackend();
         return;
@@ -646,6 +647,7 @@ void SessionManager::onAutoWaitTick()
         if (m_reconnectTimer)
             m_reconnectTimer->stop();
         stopAutoWait();
+        m_activeBackend = ActiveBackend::PortalWifi;   // 同步后端：否则 Online 被 isWifiUiLive 丢弃，UI 停在"正在认证"
         emit logMessage(QStringLiteral("检测到校园 Wi-Fi（%1），自动开始无线认证...").arg(wlan.ssid), 0);
         startWifiAuth();
         return;
