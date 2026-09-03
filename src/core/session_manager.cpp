@@ -145,14 +145,16 @@ void SessionManager::startConnection(const AuthConfig& config, const StaticIpCon
     m_connectMode   = mode;
     m_ssidWhitelist = allowedSsids;
     m_wiredFailStreak = 0;    // 用户主动发起：有线失败计数清零（auto 回退语义从零开始）
+    m_autoWaitEnabled = true; // 用户手动连接：恢复自动就绪重连
 
     // 后端决策（纯函数；auto 模式有线优先，无线仅当 SSID 命中白名单）
     const auto decision = decideBackend();
     if (decision.backend == ConnectionBuilder::AuthBackend::None) {
         emit logMessage(decision.reason, 1);
         setState(AppConnectionState::Disconnected);
-        // auto 模式下定时重新扫描（5 分钟），等待网线插入 / Wi-Fi 就绪
+        // auto 模式：既定时重扫（5 分钟兜底），更即时地监听有线路由/匹配 Wi-Fi 就绪即触发认证
         scheduleReconnect();
+        startAutoWait();
         return;
     }
     m_activeBackend = (decision.backend == ConnectionBuilder::AuthBackend::WiredEap)
@@ -376,11 +378,16 @@ void SessionManager::stopLinkWatch()
         m_linkWatchTimer->stop();
 }
 
-void SessionManager::stopConnection(bool logoutWifi)
+void SessionManager::stopConnection(bool logoutWifi, bool userInitiated)
 {
     if (m_reconnectTimer)
         m_reconnectTimer->stop();
     stopLinkWatch();    // 断开/退出/切走时停止有线插入监视
+    if (userInitiated) {
+        // 用户主动断开/退出：停止自动就绪重连（直到下次手动连接恢复）
+        m_autoWaitEnabled = false;
+        stopAutoWait();
+    }
     // 新的人工断开取消挂机（挂机中的切换交给下一轮判定/人工连接）
     m_postLogoutAction = PostLogoutAction::None;
     if (m_postLogoutTimeout)
@@ -469,6 +476,7 @@ void SessionManager::onEapSuccess(const QByteArray& md5Data)
         emit logMessage(QStringLiteral("认证成功，可以上网了！"), 0);
     }
     m_wiredFailStreak = 0;   // 有线成功：auto 回退计数清零
+    stopAutoWait();          // 已上线：不再需要就绪监听
     setState(AppConnectionState::Connected);
     startLinkWatch();        // 有线在线：联动监视（拔网线→自动切无线）
     m_udpProcess->setMd5Data(md5Data);
@@ -535,6 +543,7 @@ void SessionManager::onWifiStateChanged(WifiAuthState state, const QString& mess
             return;
         if (m_reconnectTimer && m_reconnectTimer->isActive())
             m_reconnectTimer->stop();
+        stopAutoWait();          // 已上线：不再需要就绪监听
         setState(AppConnectionState::Connected);
         startLinkWatch();
         break;
@@ -594,6 +603,53 @@ void SessionManager::onSystemResume()
         QMetaObject::invokeMethod(m_webAuthProcess, "checkNow", Qt::QueuedConnection);
 }
 
+void SessionManager::startAutoWait()
+{
+    if (!m_autoWaitEnabled || m_connectMode != ConnectMode::Auto)
+        return;                    // 用户已手动断开或非自动模式：不做自动就绪重连
+    if (!m_autoWaitTimer) {
+        m_autoWaitTimer = new QTimer(this);
+        m_autoWaitTimer->setInterval(2000);   // 就绪检测：短轮询，Wi-Fi/网线一就绪即触发
+        connect(m_autoWaitTimer, &QTimer::timeout, this, &SessionManager::onAutoWaitTick);
+    }
+    m_autoWaitTimer->start();
+}
+
+void SessionManager::stopAutoWait()
+{
+    if (m_autoWaitTimer)
+        m_autoWaitTimer->stop();
+}
+
+void SessionManager::onAutoWaitTick()
+{
+    if (!m_autoWaitEnabled || m_connectMode != ConnectMode::Auto)
+        return;
+    if (m_state != AppConnectionState::Disconnected)
+        return;                    // 已在认证/在线：由对应路径停止监听
+
+    // ① 有线优先：物理有线已接入 → 有线认证
+    if (Network::ethernetLinkUp()) {
+        if (m_reconnectTimer)
+            m_reconnectTimer->stop();
+        stopAutoWait();
+        emit logMessage(QStringLiteral("检测到有线网卡已接入，自动开始有线认证..."), 0);
+        startWiredBackend();
+        return;
+    }
+    // ② 否则：匹配白名单的 Wi-Fi 已连上 → 无线认证（解决"开机自启早于 Wi-Fi 连接"）
+    const WlanMedia::WlanInfo wlan = WlanMedia::currentWifiConnection();
+    if (wlan.connected && ConnectionBuilder::ssidMatch(wlan.ssid, m_ssidWhitelist)) {
+        if (m_reconnectTimer)
+            m_reconnectTimer->stop();
+        stopAutoWait();
+        emit logMessage(QStringLiteral("检测到校园 Wi-Fi（%1），自动开始无线认证...").arg(wlan.ssid), 0);
+        startWifiAuth();
+        return;
+    }
+    // ③ 均未就绪：保持监听，等待有线接入或 Wi-Fi 出现
+}
+
 void SessionManager::scheduleReconnect()
 {
     if (!m_reconnectTimer) {
@@ -621,6 +677,8 @@ void SessionManager::handleAuthFailed(bool retryable, const QString& nightMessag
     if (retryable) {
         // 与时段相关的失败（夜间 6:00 / 白天 5 分钟间隔同一套调度）
         scheduleNextRetry(nightMessage);
+        // 失败后立即进入就绪监听：检测到有线接入/匹配 Wi-Fi 连上即再次认证（比 5 分钟更快）
+        startAutoWait();
     } else {
         // 永久性错误（凭证/账户状态）：停止自动重试
         if (m_reconnectTimer)
@@ -692,6 +750,7 @@ void SessionManager::onReconnectTimeout()
 {
     if (m_state != AppConnectionState::Disconnected)
         return;
+    stopAutoWait();   // 正式重试：停掉就绪监听（触发后由相应路径重新按需启动）
 
     // 防御分支：定时器可能按旧间隔触发且尚未跨过夜间窗口（如连接被重置后重入），
     // 若仍在夜间则重新等待到 6:00
@@ -714,6 +773,7 @@ void SessionManager::onReconnectTimeout()
                 emit logMessage(decision.reason, 1);
                 m_activeBackend = ActiveBackend::None;
                 scheduleReconnect();
+                startAutoWait();
                 break;
             }
             // auto 模式：有线连续认证失败（≥2，常因交换机/端口不认证或环境暂不可用）
@@ -763,6 +823,7 @@ void SessionManager::onReconnectTimeout()
             if (decision.backend == ConnectionBuilder::AuthBackend::None) {
                 emit logMessage(decision.reason, 1);
                 scheduleReconnect();
+                startAutoWait();
                 break;
             }
             m_activeBackend = (decision.backend == ConnectionBuilder::AuthBackend::WiredEap)

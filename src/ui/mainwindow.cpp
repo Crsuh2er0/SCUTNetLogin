@@ -303,7 +303,7 @@ void MainWindow::onQuitApp()
     if (m_sessionManager->state() != AppConnectionState::Disconnected) {
         // 退出时是否无线注销由"退出时注销无线连接"勾选决定（默认不注销，保持在线）。
         // 有线始终正常收尾（恢复 DHCP / 停线程）。
-        m_sessionManager->stopConnection(ui->checkLogoutOnExit->isChecked());
+        m_sessionManager->stopConnection(ui->checkLogoutOnExit->isChecked(), /*userInitiated=*/true);
     }
     m_trayIcon->hide();
     qApp->quit();
@@ -589,7 +589,7 @@ void MainWindow::on_btnDisconnect_clicked()
     if (m_sessionManager->state() == AppConnectionState::Disconnected)
         return;
 
-    m_sessionManager->stopConnection();
+    m_sessionManager->stopConnection(/*logoutWifi=*/true, /*userInitiated=*/true);
 }
 
 // ============================================================================

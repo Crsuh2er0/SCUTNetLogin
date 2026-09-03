@@ -50,7 +50,8 @@ public:
                          const QStringList& allowedSsids = {});
     // logoutWifi：true（用户点"断开"）= 无线同时注销；false（退出程序且未勾选退出登出）
     // = 不注销无线连接，仅停止会话（DHCP 恢复/线程收尾照常）。
-    void stopConnection(bool logoutWifi = true);
+    // userInitiated：true = 用户主动断开/退出（此后【不】自动就绪重连，直到再次手动连接）。
+    void stopConnection(bool logoutWifi = true, bool userInitiated = false);
 
     // 开机自启（通过 Windows Task Scheduler）
     void setAutoStart(bool enable);
@@ -102,6 +103,14 @@ private:
 
     // --- 自动重连调度 ---
     void scheduleReconnect();
+    // 断开态就绪监听（解决"开机自启早于 Wi-Fi 连接"）：仅自动模式且用户未手动断开时
+    // 运行，每 2s 检查——有线插入→有线认证；否则匹配白名单 Wi-Fi 连上→无线认证。
+    // 触发认证后停止；认证失败重新进入监听。用户点连接恢复自动，点断开/退出停止。
+    void startAutoWait();
+    void stopAutoWait();
+    void onAutoWaitTick();
+    QTimer* m_autoWaitTimer = nullptr;
+    bool    m_autoWaitEnabled = false;   // 用户手动断开后置 false，直到下次手动连接恢复
     // 认证失败后的统一处理：按时间段提示 + 进入 Disconnected + 调度重连
     void scheduleNextRetry(const QString& nightMessage
                            = QStringLiteral("认证失败，将在明早 6:00 自动重试"));
