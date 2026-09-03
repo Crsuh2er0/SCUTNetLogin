@@ -150,7 +150,10 @@ void SessionManager::startConnection(const AuthConfig& config, const StaticIpCon
     // 后端决策（纯函数；auto 模式有线优先，无线仅当 SSID 命中白名单）
     const auto decision = decideBackend();
     if (decision.backend == ConnectionBuilder::AuthBackend::None) {
-        emit logMessage(decision.reason, 1);
+        // 启动先判断、未就绪即静默等待：不弹"未检测到网络"警告，等到有线接入或匹配
+        // 校园 Wi-Fi 连上（就绪监听）再自动认证；reason 仅留诊断
+        qWarning().noquote() << "auth backend undecided:" << decision.reason;
+        emit logMessage(QStringLiteral("等待网络就绪：插入网线或连接校园 Wi-Fi 后将自动认证..."), 0);
         setState(AppConnectionState::Disconnected);
         // auto 模式：既定时重扫（5 分钟兜底），更即时地监听有线路由/匹配 Wi-Fi 就绪即触发认证
         scheduleReconnect();
@@ -770,7 +773,8 @@ void SessionManager::onReconnectTimeout()
         {
             const auto decision = decideBackend();
             if (decision.backend == ConnectionBuilder::AuthBackend::None) {
-                emit logMessage(decision.reason, 1);
+                qWarning().noquote() << "auth backend undecided:" << decision.reason;
+                emit logMessage(QStringLiteral("等待网络就绪：插入网线或连接校园 Wi-Fi 后将自动认证..."), 0);
                 m_activeBackend = ActiveBackend::None;
                 scheduleReconnect();
                 startAutoWait();
@@ -821,7 +825,8 @@ void SessionManager::onReconnectTimeout()
         {
             const auto decision = decideBackend();
             if (decision.backend == ConnectionBuilder::AuthBackend::None) {
-                emit logMessage(decision.reason, 1);
+                qWarning().noquote() << "auth backend undecided:" << decision.reason;
+                emit logMessage(QStringLiteral("等待网络就绪：插入网线或连接校园 Wi-Fi 后将自动认证..."), 0);
                 scheduleReconnect();
                 startAutoWait();
                 break;
