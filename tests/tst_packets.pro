@@ -36,7 +36,8 @@ SOURCES += \
     ../src/config/config_manager.cpp \
     ../src/config/credential.cpp \
     ../src/portal/portal_protocol.cpp \
-    ../src/portal/portal_process.cpp
+    ../src/portal/portal_process.cpp \
+    ../src/wifi/portal_parser.cpp
 
 HEADERS += \
     ../src/eap/eapol_packet.h \
@@ -50,4 +51,6 @@ HEADERS += \
     ../src/config/config_manager.h \
     ../src/config/credential.h \
     ../src/portal/portal_protocol.h \
-    ../src/portal/portal_process.h
+    ../src/portal/portal_process.h \
+    ../src/wifi/portal_parser.h \
+    wifi_fixtures.h

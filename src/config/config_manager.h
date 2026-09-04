@@ -22,9 +22,11 @@ struct AppConfig {
     bool    autoStart       = false;
     bool    autoConnect     = false;
     bool    debug           = false;  // 调试开关：产出请求/响应级调试日志（含脱敏 URL）
+    // 无线模块（上游 connectMode 字段：auto / wired / wireless）
+    QString connectMode     = "auto";          // 联网方式决策；SSID 白名单，逗号分隔
+    QString wifiSsids       = "scut-student";  // 空 = 任意
+    bool    logoutOnExit    = false;           // 退出程序时注销无线连接（可选，默认不登出）
 };
-
-// UI 数据比较（"保存配置"脏检测等）
 inline bool operator==(const AppConfig& a, const AppConfig& b)
 {
     return a.username      == b.username
@@ -42,7 +44,10 @@ inline bool operator==(const AppConfig& a, const AppConfig& b)
         && a.autoSetNetwork == b.autoSetNetwork
         && a.autoStart      == b.autoStart
         && a.autoConnect    == b.autoConnect
-        && a.debug          == b.debug;
+        && a.debug          == b.debug
+        && a.connectMode    == b.connectMode
+        && a.wifiSsids     == b.wifiSsids
+        && a.logoutOnExit   == b.logoutOnExit;
 }
 
 inline bool operator!=(const AppConfig& a, const AppConfig& b) { return !(a == b); }
@@ -64,6 +69,10 @@ AuthConfig toAuthConfig(const AppConfig& cfg);
 // 填充 AuthConfig 的运行时字段（hostname、DNS server IP 解析、IP 回退）
 // 调用时机：toAuthConfig 之后、传入 SessionManager 之前
 void resolveAuthConfig(AuthConfig& config);
+
+// 联网方式字符串 ↔ 枚举（未知/空串回落为 Auto；UI 与 SessionManager 共用）
+ConnectMode connectModeFromString(const QString& s);
+QString     connectModeToString(ConnectMode m);
 
 } // namespace ConfigManager
 

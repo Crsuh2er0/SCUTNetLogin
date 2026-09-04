@@ -5,6 +5,7 @@
 #include "config/config_manager.h"
 #include "network/network.h"
 #include "portal/portal_protocol.h"
+#include "wifi/wlan_media.h"
 #include "log/log_manager.h"
 #include <QMessageBox>
 #include <QNetworkInterface>
@@ -159,7 +160,7 @@ MainWindow::MainWindow(QWidget* parent)
     applyAuthModeUI();   // 显式同步一次（配置为有线默认值时不触发 currentIndexChanged）
     initSystemTray(appIcon);
 
-    // 异步枚举网卡（pcap_findalldevs 可阻塞数百 ms，避免延迟首帧显示）。
+// 异步枚举网卡（pcap_findalldevs 可阻塞数百 ms，避免延迟首帧显示）。
     // 完成后回主线程填充下拉框、按保存的网卡恢复选择，并自动探测网络参数。
     QPointer<MainWindow> guard(this);
     QThreadPool::globalInstance()->start(QRunnable::create([guard, name = m_savedInterfaceName]() {
@@ -173,6 +174,7 @@ MainWindow::MainWindow(QWidget* parent)
             guard->m_lastSavedConfig = guard->collectCurrentCfg();
         }, Qt::QueuedConnection);
     }));
+    updateConnectModeLabel(AppConnectionState::Disconnected);   // 初始"当前连接模式：未连接"
 
     // 窗口几何记忆（注册表存储，独立于 config.ini 认证配置）
     QSettings uiSettings;
@@ -287,10 +289,8 @@ void MainWindow::initSystemTray(const QIcon& icon)
 void MainWindow::setSilentStartup()
 {
     hide();
-    // 静默启动（--silent / -s / --minimized，对应开机自启的 schtasks 场景）
+    // 静默启动（--silent / -s / --minimized，开机自启的 schtasks 场景）
     // 语义 = 自动连接：README 承诺"静默启动...直接最小化到托盘并自动连接"。
-    // 此前要求勾选"启动后自动连接"才发起，导致只勾了"开机自启动"的用户
-    // 开机后一直处于断开状态（6:00 自动重试只是进程内定时器，跨不了重启）。
     QTimer::singleShot(SILENT_CONNECT_DELAY, this, [this]() {
         onLogMessage(QStringLiteral("静默启动：自动连接已开启，正在连接..."), 0);
         if (m_autoConnectPending)
@@ -298,9 +298,7 @@ void MainWindow::setSilentStartup()
         m_autoConnectPending = true;
         autoConnectWithRetry();
     });
-    m_trayIcon->showMessage(QStringLiteral("SCUT 校园网认证"),
-                            QStringLiteral("程序已静默启动，点击托盘图标显示窗口"),
-                            QSystemTrayIcon::Information, 2000);
+    // 静默启动（开机自启）不弹系统托盘消息：用户要求开机自启时避免打扰
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
@@ -308,10 +306,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     if (m_trayIcon->isVisible() && !m_isQuitting) {
         // 记录窗口几何（恢复正常模式后再启动时恢复）
         QSettings().setValue(QStringLiteral("ui/windowGeometry"), saveGeometry());
-        hide();
-        m_trayIcon->showMessage(QStringLiteral("提示"),
-                                QStringLiteral("程序已最小化到托盘运行"),
-                                QSystemTrayIcon::Information, 2000);
+        hide();   // 关闭到托盘：不弹系统消息（用户要求静默）
         event->ignore();
     }
 }
@@ -337,8 +332,11 @@ void MainWindow::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason)
 void MainWindow::onQuitApp()
 {
     m_isQuitting = true;
-    if (m_sessionManager->state() != AppConnectionState::Disconnected)
-        m_sessionManager->stopConnection();
+    if (m_sessionManager->state() != AppConnectionState::Disconnected) {
+        // 退出时是否无线注销由"退出时注销无线连接"勾选决定（默认不注销，保持在线）。
+        // 有线始终正常收尾（恢复 DHCP / 停线程）。
+        m_sessionManager->stopConnection(ui->checkLogoutOnExit->isChecked(), /*userInitiated=*/true);
+    }
     m_trayIcon->hide();
     qApp->quit();
 }
@@ -468,9 +466,12 @@ void MainWindow::loadConfig()
     ui->checkAutoStart->setChecked(cfg.autoStart);
     ui->checkAutoConnect->setChecked(cfg.autoConnect);
     ui->checkDebug->setChecked(cfg.debug);
+    ui->checkLogoutOnExit->setChecked(cfg.logoutOnExit);
+    ui->editSsid->setText(cfg.wifiSsids);
 
     // 记录保存的网卡名：构造时网卡下拉为空，此处在 populate 完成后恢复选择
     m_savedInterfaceName = cfg.interfaceName;
+    updateConnectModeLabel(AppConnectionState::Disconnected);
 
     for (int i = 0; i < ui->comboInterface->count(); i++) {
         if (ui->comboInterface->itemData(i).toString() == cfg.interfaceName) {
@@ -502,6 +503,8 @@ AppConfig MainWindow::collectCurrentCfg()
     cfg.autoStart      = ui->checkAutoStart->isChecked();
     cfg.autoConnect    = ui->checkAutoConnect->isChecked();
     cfg.debug          = ui->checkDebug->isChecked();
+    cfg.wifiSsids      = ui->editSsid->text().trimmed();
+    cfg.logoutOnExit   = ui->checkLogoutOnExit->isChecked();
     return cfg;
 }
 
@@ -514,9 +517,7 @@ void MainWindow::saveConfig()
 
     // 开机自启动：每次保存都把「期望状态」交给 NetworkWorker，由它核对系统里任务「实际指向
     // 的目标」是否为当前运行 exe，只有真正失配（任务不存在 / 指向别的 exe / 缺 --silent）时
-    // 才 /create 或 /delete。原实现用「勾选状态是否变化」做守卫，一旦 config 已是 autoStart=true
-    // 但任务仍指向旧 exe（如从开发版换装到 Program Files），勾选没变就永不重建，自启永远失效。
-    // 如今核对发生在任务侧，保存/连接时依旧不会频繁增删任务（worker 查询后直接 no-op）。
+    // 才 /create 或 /delete。核对发生在任务侧，保存/连接时不会频繁增删任务（查询后 no-op）。
     setAutoStartRegistry(ui->checkAutoStart->isChecked());
 }
 
@@ -531,9 +532,19 @@ void MainWindow::setAutoStartRegistry(bool enable)
 
 void MainWindow::on_btnConnect_clicked()
 {
-    if (m_sessionManager->state() != AppConnectionState::Disconnected)
+    if (m_sessionManager->state() != AppConnectionState::Disconnected) {
+        // 连接中按钮已禁用，但 Ctrl+Enter 快捷键仍可达——给出明确提示
+        onLogMessage(QStringLiteral("当前已在连接流程中，请先点「断开」再连接"), 1);
         return;
+    }
+    connectWithCurrentInput();
+}
 
+// 收集当前窗体输入并启动连接。联网方式固定为"自动"（有线优先、无线兜底）——
+// 模式切换功能已按用户要求移除：有线/无线由链路状态自动决定，意图不会被误读。
+// （本 PR 保留 authMode=wireless 显式无线分支：无线不依赖 Npcap 网卡，跳过就绪检测）
+void MainWindow::connectWithCurrentInput()
+{
     const bool wireless = isWirelessMode();
 
     // 无线 Portal 不依赖 Npcap 网卡；仅有线模式要求网卡可用
@@ -558,6 +569,7 @@ void MainWindow::on_btnConnect_clicked()
     in.gateway = ui->editGateway->text().trimmed();
     in.dns1    = ui->editDNSServer->text().trimmed();
     in.dns2    = ui->editBackupDNS->text().trimmed();
+    in.ssidRaw = ui->editSsid->text().trimmed();
 
     // 校验失败直接终止（不持久化、不启动）
     ConnectionBuilder::Result r = ConnectionBuilder::build(in);
@@ -570,12 +582,13 @@ void MainWindow::on_btnConnect_clicked()
     ui->textLog->clear();
 
     AuthConfig config = getCurrentConfig();
+    const QStringList ssids = ConnectionBuilder::parseSsidList(in.ssidRaw);
     if (r.needStaticIp) {
         ui->btnDisconnect->setEnabled(false);
         m_actionDisconnect->setEnabled(false);
-        m_sessionManager->startConnection(config, r.ipConfig);
+        m_sessionManager->startConnection(config, r.ipConfig, ConnectMode::Auto, ssids);
     } else {
-        m_sessionManager->startConnection(config);
+        m_sessionManager->startConnection(config, {}, ConnectMode::Auto, ssids);
     }
 }
 
@@ -745,7 +758,7 @@ void MainWindow::on_btnDisconnect_clicked()
     if (m_sessionManager->state() == AppConnectionState::Disconnected)
         return;
 
-    m_sessionManager->stopConnection();
+    m_sessionManager->stopConnection(/*logoutWifi=*/true, /*userInitiated=*/true);
 }
 
 // ============================================================================
@@ -771,18 +784,23 @@ void MainWindow::applyStateUI(AppConnectionState state)
     static const StateInfo kConnected = {
         QStringLiteral("已连接"), QStringLiteral("校园网已连接，可以上网"),
         QStringLiteral(" (已连接)"), QStringLiteral("connected"), true };
-    // 认证中文案按认证方式区分（有线 802.1X / 无线 Portal）
+// 认证中文案按认证方式区分（有线 802.1X / 无线 Portal）
     const StateInfo kAuthenticating = {
         QStringLiteral("正在认证..."),
         isWirelessMode() ? QStringLiteral("正在进行 Portal 网页认证")
                          : QStringLiteral("正在发送802.1X认证包"),
         QStringLiteral(" (认证中...)"), QStringLiteral("connecting"), true };
+    // 无线 Portal 认证中（探测/门户/登录/上线确认——细化文案来自日志）
+    static const StateInfo kWiFiConnecting = {
+        QStringLiteral("正在认证..."), QStringLiteral("正在连接无线校园网（门户认证）"),
+        QStringLiteral(" (无线认证中...)"), QStringLiteral("connecting"), true };
 
     const StateInfo* info = nullptr;
     switch (state) {
     case AppConnectionState::Disconnected:   info = &kDisconnected;   break;
     case AppConnectionState::SettingNetwork: info = &kSettingNetwork; break;
     case AppConnectionState::Authenticating: info = &kAuthenticating; break;
+    case AppConnectionState::WiFiConnecting: info = &kWiFiConnecting; break;
     case AppConnectionState::Connected:      info = &kConnected;      break;
     default:
         return;  // 防御：枚举越界直接忽略（状态由 SessionManager 内部状态机产生）
@@ -815,7 +833,8 @@ void MainWindow::updateStatusIcon(AppConnectionState state)
     ui->labelStatusIcon->setPixmap(makeStatusIcon(state, m_statusAngle));
 
     if (state == AppConnectionState::SettingNetwork
-        || state == AppConnectionState::Authenticating) {
+        || state == AppConnectionState::Authenticating
+        || state == AppConnectionState::WiFiConnecting) {
         if (!m_statusTimer->isActive())
             m_statusTimer->start();
     } else {
@@ -823,9 +842,39 @@ void MainWindow::updateStatusIcon(AppConnectionState state)
     }
 }
 
+void MainWindow::updateConnectModeLabel(AppConnectionState state)
+{
+    // "当前连接模式"：以 SessionManager 后端与实时链路为准（wlanapi 关联状态只反映
+    // 是否连接了热点，不代表认证，故以认证状态机的后端为准）。
+    QString mode;
+    switch (state) {
+    case AppConnectionState::Connected:
+        if (m_sessionManager->activeBackend() == ActiveBackend::PortalWifi) {
+            const WlanMedia::WlanInfo wlan = WlanMedia::currentWifiConnection();
+            mode = wlan.connected
+                       ? QStringLiteral("无线（%1）").arg(wlan.ssid)
+                       : QStringLiteral("无线");
+        } else {
+            mode = QStringLiteral("有线");
+        }
+        break;
+    case AppConnectionState::Disconnected:
+        mode = QStringLiteral("未连接");
+        break;
+    default:
+        // SettingNetwork / Authenticating / WiFiConnecting：后端已定，直接按后端显示
+        mode = (m_sessionManager->activeBackend() == ActiveBackend::PortalWifi)
+                   ? QStringLiteral("无线")
+                   : QStringLiteral("有线");
+        break;
+    }
+    ui->labelWifiStatus->setText(QStringLiteral("当前连接模式：%1").arg(mode));
+}
+
 void MainWindow::onStateChanged(AppConnectionState state)
 {
     applyStateUI(state);
+    updateConnectModeLabel(state);
 }
 
 // ============================================================================

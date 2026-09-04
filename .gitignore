@@ -91,3 +91,6 @@ tools/utf8__*
 
 # git 自身
 .gitignore
+
+# wifi 协议研究文档（副产物，不入库）
+docs/
