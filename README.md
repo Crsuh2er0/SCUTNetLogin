@@ -178,9 +178,9 @@ qmake tst_packets.pro && nmake release
 .\release\tst_packets.exe
 ```
 
-CI（GitHub Actions）在每次推送/PR 时自动构建并运行同一套测试。
-
 ---
+
+
 
 ## 项目结构
 
